@@ -5,7 +5,7 @@
      then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M3 — normalized-hash deduplication and canonical linkage.
+**Current milestone:** M4 — resilient structured enrichment via local Qwen.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 
@@ -13,7 +13,7 @@ STATUS: IN PROGRESS
       .gitignore (data/, *.db, logs/, caches, __pycache__). Directory layout decided.
 - [x] **M2 — Ingest + storage.** Fetch author feed (offline via reference/feed_sample.json first),
       SQLite schema, store raw posts idempotently (uri = PK). Pagination-to-last-seen.
-- [ ] **M3 — Dedup.** Normalize + hash + windowed collapse of ALLCAPS/Title-Case reposts;
+- [x] **M3 — Dedup.** Normalize + hash + windowed collapse of ALLCAPS/Title-Case reposts;
       canonical vs duplicate rows. Verify it collapses the known dupes in the fixture.
 - [ ] **M4 — Enrich (local Qwen).** Structured tagging via localhost:11434: summary, category,
       importance, sentiment, instruments (global symbols), entities, regions. Resilient to bad output.
@@ -36,6 +36,13 @@ STATUS: IN PROGRESS
   builds unauthenticated `posts_no_replies` requests and the paginator stops at an entirely known
   page or an eight-page cap. Offline CLI verification inserted 60 posts on the first run and 0 on
   the second; six unit tests pass, including multi-page traversal and high-water correctness.
+- 2026-08-24 / M3: Added lowercase/whitespace/trailing-punctuation normalization, stable SHA-1
+  hashes, and deterministic 60-minute clustering anchored on the earliest chronological post.
+  Duplicates remain auditable and link directly to canonical rows; existing M2 databases migrate
+  and backfill transactionally. Offline fixture verification yields exactly 60 stored / 55
+  canonical / 5 duplicate rows and is idempotent on rerun. Sixteen tests pass, including reverse
+  insertion order, overlapping-window non-chaining, timezone-offset ordering, exact boundary,
+  malformed legacy data, migration, and canonical-link invariants. Independent review passed.
 
 ## Blockers
 (none)

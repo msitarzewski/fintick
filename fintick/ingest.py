@@ -58,6 +58,7 @@ class BlueskyFeedClient:
 class IngestStats:
     fetched: int = 0
     inserted: int = 0
+    deduplicated: int = 0
     pages: int = 0
 
 
@@ -73,11 +74,14 @@ def ingest_page(
         raise ValueError("feed response must contain a feed list")
 
     inserted = 0
+    deduplicated = 0
     with open_database(database) as connection:
         for item in feed:
             if not isinstance(item, dict) or not isinstance(item.get("post"), dict):
                 continue
-            inserted += insert_post(connection, item["post"])
+            result = insert_post(connection, item["post"])
+            inserted += result.inserted
+            deduplicated += result.deduplicated
         if feed and update_high_water:
             newest = feed[0].get("post", {})
             if newest.get("uri"):
@@ -86,7 +90,12 @@ def ingest_page(
             if created_at:
                 set_state(connection, "newest_created_at", created_at)
 
-    return IngestStats(fetched=len(feed), inserted=inserted, pages=1)
+    return IngestStats(
+        fetched=len(feed),
+        inserted=inserted,
+        deduplicated=deduplicated,
+        pages=1,
+    )
 
 
 def ingest_author_feed(
@@ -99,13 +108,14 @@ def ingest_author_feed(
     if max_pages < 1:
         raise ValueError("max_pages must be at least 1")
 
-    fetched = inserted = pages = 0
+    fetched = inserted = deduplicated = pages = 0
     cursor: str | None = None
     for _ in range(max_pages):
         data = fetch_page(cursor)
         page = ingest_page(data, database, update_high_water=pages == 0)
         fetched += page.fetched
         inserted += page.inserted
+        deduplicated += page.deduplicated
         pages += 1
 
         # A completely known page is the durable high-water mark: all older
@@ -117,7 +127,12 @@ def ingest_author_feed(
             break
         cursor = next_cursor
 
-    return IngestStats(fetched=fetched, inserted=inserted, pages=pages)
+    return IngestStats(
+        fetched=fetched,
+        inserted=inserted,
+        deduplicated=deduplicated,
+        pages=pages,
+    )
 
 
 def ingest_fixture(fixture: str | Path, database: str | Path) -> IngestStats:

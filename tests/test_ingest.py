@@ -33,8 +33,10 @@ class OfflineIngestTests(unittest.TestCase):
 
             self.assertEqual(first.fetched, 60)
             self.assertEqual(first.inserted, 60)
+            self.assertEqual(first.deduplicated, 5)
             self.assertEqual(second.fetched, 60)
             self.assertEqual(second.inserted, 0)
+            self.assertEqual(second.deduplicated, 0)
             with sqlite3.connect(database) as connection:
                 count = connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
                 row = connection.execute(

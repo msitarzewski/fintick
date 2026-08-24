@@ -61,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         print(
             f"ingest fetched={stats.fetched} new={stats.inserted} "
-            f"pages={stats.pages}"
+            f"deduped={stats.deduplicated} pages={stats.pages}"
         )
         return 0
 

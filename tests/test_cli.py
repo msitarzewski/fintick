@@ -34,7 +34,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(count, 60)
-        self.assertIn("fetched=60 new=60 pages=1", output.getvalue())
+        self.assertIn("fetched=60 new=60 deduped=5 pages=1", output.getvalue())
 
 
 if __name__ == "__main__":
