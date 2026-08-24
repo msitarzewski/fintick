@@ -1,0 +1,18 @@
+[project]
+name = "fintick"
+version = "0.1.0"
+description = "A local-first financial intelligence tape powered by Bluesky and Qwen"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Michael Sitarzewski" }]
+
+[project.scripts]
+fintick = "fintick.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fintick*"]

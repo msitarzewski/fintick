@@ -1,0 +1,1 @@
+"""FinTick test suite."""
