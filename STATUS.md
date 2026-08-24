@@ -5,7 +5,7 @@
      then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M4 — resilient structured enrichment via local Qwen.
+**Current milestone:** M5 — bounded related-story research and caching.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 
@@ -15,7 +15,7 @@ STATUS: IN PROGRESS
       SQLite schema, store raw posts idempotently (uri = PK). Pagination-to-last-seen.
 - [x] **M3 — Dedup.** Normalize + hash + windowed collapse of ALLCAPS/Title-Case reposts;
       canonical vs duplicate rows. Verify it collapses the known dupes in the fixture.
-- [ ] **M4 — Enrich (local Qwen).** Structured tagging via localhost:11434: summary, category,
+- [x] **M4 — Enrich (local Qwen).** Structured tagging via localhost:11434: summary, category,
       importance, sentiment, instruments (global symbols), entities, regions. Resilient to bad output.
 - [ ] **M5 — Research.** Web lookup of related stories for importance ≥ 3 items; attach links; cache.
 - [ ] **M6 — Dashboard.** Auto-refreshing tape + enriched cards; dark terminal aesthetic; symbol chips.
@@ -43,6 +43,14 @@ STATUS: IN PROGRESS
   canonical / 5 duplicate rows and is idempotent on rerun. Sixteen tests pass, including reverse
   insertion order, overlapping-window non-chaining, timezone-offset ordering, exact boundary,
   malformed legacy data, migration, and canonical-link invariants. Independent review passed.
+- 2026-08-24 / M4: Added one-headline-per-call enrichment through Ollama's native forced-JSON
+  endpoint, with strict validation for summary/category/importance/sentiment/instruments/entities/
+  regions, thinking-wrapper cleanup, per-item error isolation, and a three-attempt cap. Canonical
+  work is atomically leased with fenced UUID tokens, so concurrent or stale workers cannot corrupt
+  completed results; abandoned leases become retryable after 15 minutes. Offline stubs cover bad
+  JSON, missing structure, retries, canonical-only selection, concurrency, and stale-worker races.
+  A real local `qwen3.8:27b` smoke test produced a complete NVDA enrichment from the fixture.
+  Twenty-six tests pass; repeated concurrency checks and independent pre-commit review passed.
 
 ## Blockers
 (none)

@@ -30,6 +30,24 @@ CREATE TABLE IF NOT EXISTS posts (
 """
 
 SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS enrichments (
+        uri TEXT PRIMARY KEY REFERENCES posts(uri) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK (status IN ('processing', 'complete', 'error')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_token TEXT,
+        summary TEXT,
+        category TEXT,
+        importance INTEGER CHECK (importance BETWEEN 1 AND 5),
+        sentiment TEXT,
+        instruments_json TEXT NOT NULL DEFAULT '[]',
+        entities_json TEXT NOT NULL DEFAULT '[]',
+        regions_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT,
+        enriched_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS enrichments_status_idx ON enrichments(status, attempts)",
     "CREATE INDEX IF NOT EXISTS posts_created_at_idx ON posts(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS posts_dedup_idx "
     "ON posts(normalized_hash, created_at)",

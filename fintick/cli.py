@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from fintick import __version__
+from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
 
 
@@ -40,6 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument(
         "--actor", default="fintwitter.bsky.social", help="Bluesky handle or DID"
     )
+    enrich = subparsers.add_parser(
+        "enrich", help="enrich pending canonical posts with local Qwen"
+    )
+    enrich.add_argument(
+        "--database", default="data/fintick.db", help="SQLite database path"
+    )
+    enrich.add_argument(
+        "--limit", type=int, default=10, help="maximum posts to process this run"
+    )
+    enrich.add_argument(
+        "--max-attempts", type=int, default=3, help="retry cap per post"
+    )
     return parser
 
 
@@ -62,6 +75,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"ingest fetched={stats.fetched} new={stats.inserted} "
             f"deduped={stats.deduplicated} pages={stats.pages}"
+        )
+        return 0
+
+    if args.command == "enrich":
+        stats = enrich_pending(
+            args.database, limit=args.limit, max_attempts=args.max_attempts
+        )
+        print(
+            f"enrich selected={stats.selected} enriched={stats.enriched} "
+            f"errored={stats.errored}"
         )
         return 0
 
