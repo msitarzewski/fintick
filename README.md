@@ -17,10 +17,9 @@ No cloud AI. No paid market-data API. No triplicate headlines.
 
 ## Status
 
-FinTick is under active autonomous construction. Durable Bluesky ingest now runs
-both offline and live, including pagination-to-last-seen and idempotent SQLite
-storage. Deduplication, enrichment, research, and the dashboard arrive in
-successive milestone commits. `STATUS.md` is the current source of truth.
+FinTick's end-to-end pipeline is operational: durable Bluesky ingest, auditable
+deduplication, local-model enrichment, bounded related-story research, and the
+live dashboard. `STATUS.md` tracks the final acceptance pass.
 
 ## Quick start
 
@@ -36,22 +35,36 @@ The offline fixture at `reference/feed_sample.json` is the first proving ground.
 Live Bluesky access is used only after the offline ingest and dedup pipeline
 passes.
 
-## Intended runtime
-
-Once the pipeline milestones land, the main commands will be separate,
-restart-safe processes:
+## Run it
 
 ```bash
 # Offline proving run (never contacts Bluesky)
 python3 -m fintick ingest --fixture reference/feed_sample.json
 
-# Live public AppView run; follows up to eight pages by default
-python3 -m fintick ingest
+# Start the continuous workers (separate terminals)
+python3 -m fintick ingest --watch
+python3 -m fintick enrich --watch
+python3 -m fintick research --watch
+python3 -m fintick serve
+```
+
+Open <http://127.0.0.1:8080>. The worker intervals are configurable with
+`--interval`; ingest defaults to 15 minutes. Each worker runs an immediate cycle,
+logs counts to stdout, survives transient cycle failures, and exits cleanly on
+SIGTERM/SIGINT. Continuous enrichment and research deliberately process one item
+per cycle so shutdown never sits behind a claimed batch; one-shot commands still
+honor `--limit` for bulk work.
+
+For unattended operation across reboots, install the four Supervisor programs:
+
+```bash
+sudo ./setup-fintick-supervisor.sh
+sudo supervisorctl reread && sudo supervisorctl update
 ```
 
 The production database lives at `data/fintick.db`. Runtime data, logs, caches,
-and secrets are ignored by git. A supervisor installer will make the workers
-survive reboots without baking machine-specific state into the repository.
+and secrets are ignored by git. FinTick itself runs as the unprivileged `michael`
+user; the installer needs root only to write Supervisor configuration.
 
 ## Architecture
 

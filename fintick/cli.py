@@ -10,6 +10,7 @@ from fintick.dashboard import serve_dashboard
 from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
 from fintick.research import research_pending
+from fintick.runtime import run_periodically, timestamp
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument(
         "--actor", default="fintwitter.bsky.social", help="Bluesky handle or DID"
     )
+    ingest.add_argument("--watch", action="store_true", help="poll continuously")
+    ingest.add_argument(
+        "--interval", type=float, default=900, help="watch interval in seconds (default: 900)"
+    )
     enrich = subparsers.add_parser(
         "enrich", help="enrich pending canonical posts with local Qwen"
     )
@@ -54,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enrich.add_argument(
         "--max-attempts", type=int, default=3, help="retry cap per post"
+    )
+    enrich.add_argument("--watch", action="store_true", help="process continuously")
+    enrich.add_argument(
+        "--interval", type=float, default=15, help="watch interval in seconds (default: 15)"
     )
     research = subparsers.add_parser(
         "research", help="find related stories for important enriched posts"
@@ -70,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     research.add_argument(
         "--max-attempts", type=int, default=3, help="retry cap per post"
+    )
+    research.add_argument("--watch", action="store_true", help="process continuously")
+    research.add_argument(
+        "--interval", type=float, default=300, help="watch interval in seconds (default: 300)"
     )
     serve = subparsers.add_parser(
         "serve", help="serve the live financial tape dashboard"
@@ -95,38 +108,61 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "ingest":
-        if args.fixture:
-            stats = ingest_fixture(args.fixture, args.database)
-        else:
-            client = BlueskyFeedClient(args.actor)
-            stats = ingest_author_feed(
-                client.fetch_page, args.database, max_pages=args.max_pages
+        client = None if args.fixture else BlueskyFeedClient(args.actor)
+        def ingest_cycle() -> None:
+            if args.fixture:
+                stats = ingest_fixture(args.fixture, args.database)
+            else:
+                assert client is not None
+                stats = ingest_author_feed(
+                    client.fetch_page, args.database, max_pages=args.max_pages
+                )
+            print(
+                f"{timestamp()} ingest fetched={stats.fetched} new={stats.inserted} "
+                f"deduped={stats.deduplicated} pages={stats.pages}", flush=True
             )
-        print(
-            f"ingest fetched={stats.fetched} new={stats.inserted} "
-            f"deduped={stats.deduplicated} pages={stats.pages}"
-        )
+        if args.watch:
+            run_periodically("ingest", ingest_cycle, args.interval)
+        else:
+            ingest_cycle()
         return 0
 
     if args.command == "enrich":
-        stats = enrich_pending(
-            args.database, limit=args.limit, max_attempts=args.max_attempts
-        )
-        print(
-            f"enrich selected={stats.selected} enriched={stats.enriched} "
-            f"errored={stats.errored}"
-        )
+        def enrich_cycle() -> None:
+            stats = enrich_pending(
+                args.database,
+                # A watch cycle claims one expensive item so a stop signal
+                # never has to wait behind an entire model batch.
+                limit=1 if args.watch else args.limit,
+                max_attempts=args.max_attempts,
+            )
+            print(
+                f"{timestamp()} enrich selected={stats.selected} enriched={stats.enriched} "
+                f"errored={stats.errored}", flush=True
+            )
+        if args.watch:
+            run_periodically("enrich", enrich_cycle, args.interval)
+        else:
+            enrich_cycle()
         return 0
 
     if args.command == "research":
-        stats = research_pending(
-            args.database, limit=args.limit, threshold=args.threshold,
-            max_attempts=args.max_attempts,
-        )
-        print(
-            f"research selected={stats.selected} researched={stats.researched} "
-            f"errored={stats.errored}"
-        )
+        def research_cycle() -> None:
+            stats = research_pending(
+                args.database,
+                # Bound graceful-stop latency in continuous mode.
+                limit=1 if args.watch else args.limit,
+                threshold=args.threshold,
+                max_attempts=args.max_attempts,
+            )
+            print(
+                f"{timestamp()} research selected={stats.selected} researched={stats.researched} "
+                f"errored={stats.errored}", flush=True
+            )
+        if args.watch:
+            run_periodically("research", research_cycle, args.interval)
+        else:
+            research_cycle()
         return 0
 
     if args.command == "serve":

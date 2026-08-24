@@ -5,7 +5,7 @@
      then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M7 — long-lived processes, supervisor install script, and live smoke test.
+**Current milestone:** M8 — final acceptance pass and README/dashboard polish.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 
@@ -19,7 +19,7 @@ STATUS: IN PROGRESS
       importance, sentiment, instruments (global symbols), entities, regions. Resilient to bad output.
 - [x] **M5 — Research.** Web lookup of related stories for importance ≥ 3 items; attach links; cache.
 - [x] **M6 — Dashboard.** Auto-refreshing tape + enriched cards; dark terminal aesthetic; symbol chips.
-- [ ] **M7 — Run-as-process.** Long-lived processes; self-test with setsid/nohup; write
+- [x] **M7 — Run-as-process.** Long-lived processes; self-test with setsid/nohup; write
       setup-fintick-supervisor.sh for Michael. Live smoke test against the real API.
 - [ ] **M8 — Acceptance pass.** Walk PRD §7 items 1–7; confirm each; polish README with a real
       screenshot/ASCII of the running tape.
@@ -68,6 +68,16 @@ STATUS: IN PROGRESS
   HTTP(S) related links. Offline runtime verification served the 60-post fixture as 55 canonical
   signals; 43 tests and compileall pass, including 40 concurrent HTTP reads. Independent review
   passed after its two blocking findings were fixed.
+- 2026-08-24 / M7: Added resilient `--watch` modes for ingest, enrich, and research with immediate
+  cycles, configurable intervals, UTC count logs, transient-failure isolation, and clean
+  SIGTERM/SIGINT shutdown. Added an author-style root installer for four unprivileged Supervisor
+  programs with restart policy and rotating logs. All four processes were launched under the
+  current user against the offline fixture; they stayed up, served enriched tape data over HTTP,
+  and shut down correctly. A polite two-run live AppView smoke stored 200 unique URI rows on the
+  first pass (189 canonical / 11 duplicate) and inserted zero on the second. Forty-seven tests,
+  compileall, shell syntax validation, and final independent review pass. Review-driven hardening
+  moved Supervisor logs to root-owned `/var/log/fintick`, bounded watch cycles to one expensive
+  item, and set stop windows above complete configured I/O budgets.
 
 ## Blockers
 (none)
