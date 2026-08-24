@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from fintick import __version__
 from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
+from fintick.research import research_pending
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +54,22 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument(
         "--max-attempts", type=int, default=3, help="retry cap per post"
     )
+    research = subparsers.add_parser(
+        "research", help="find related stories for important enriched posts"
+    )
+    research.add_argument(
+        "--database", default="data/fintick.db", help="SQLite database path"
+    )
+    research.add_argument(
+        "--limit", type=int, default=5, help="maximum posts to research this run"
+    )
+    research.add_argument(
+        "--threshold", type=int, default=3, choices=range(1, 6),
+        help="minimum importance score (1-5)",
+    )
+    research.add_argument(
+        "--max-attempts", type=int, default=3, help="retry cap per post"
+    )
     return parser
 
 
@@ -84,6 +101,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             f"enrich selected={stats.selected} enriched={stats.enriched} "
+            f"errored={stats.errored}"
+        )
+        return 0
+
+    if args.command == "research":
+        stats = research_pending(
+            args.database, limit=args.limit, threshold=args.threshold,
+            max_attempts=args.max_attempts,
+        )
+        print(
+            f"research selected={stats.selected} researched={stats.researched} "
             f"errored={stats.errored}"
         )
         return 0

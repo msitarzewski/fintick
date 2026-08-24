@@ -5,7 +5,7 @@
      then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M5 — bounded related-story research and caching.
+**Current milestone:** M6 — live dashboard and scrolling tape.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 
@@ -17,7 +17,7 @@ STATUS: IN PROGRESS
       canonical vs duplicate rows. Verify it collapses the known dupes in the fixture.
 - [x] **M4 — Enrich (local Qwen).** Structured tagging via localhost:11434: summary, category,
       importance, sentiment, instruments (global symbols), entities, regions. Resilient to bad output.
-- [ ] **M5 — Research.** Web lookup of related stories for importance ≥ 3 items; attach links; cache.
+- [x] **M5 — Research.** Web lookup of related stories for importance ≥ 3 items; attach links; cache.
 - [ ] **M6 — Dashboard.** Auto-refreshing tape + enriched cards; dark terminal aesthetic; symbol chips.
 - [ ] **M7 — Run-as-process.** Long-lived processes; self-test with setsid/nohup; write
       setup-fintick-supervisor.sh for Michael. Live smoke test against the real API.
@@ -51,6 +51,14 @@ STATUS: IN PROGRESS
   JSON, missing structure, retries, canonical-only selection, concurrency, and stale-worker races.
   A real local `qwen3.8:27b` smoke test produced a complete NVDA enrichment from the fixture.
   Twenty-six tests pass; repeated concurrency checks and independent pre-commit review passed.
+- 2026-08-24 / M5: Added bounded Google News RSS research for complete canonical enrichments at
+  importance ≥3, with focused queries derived from local summaries/entities, strict 1–2-link
+  validation, URL deduplication, durable per-URI caching, retry caps, fenced 15-minute leases, and
+  per-item failure isolation. HTTP 429 responses honor numeric Retry-After with a bounded delay and
+  one polite retry. Offline fixture/stub coverage proves eligibility, caching, malformed-data
+  resilience, failure isolation, RSS parsing, and rate-limit behavior. A one-request live smoke test
+  attached two genuinely related NVIDIA/SpaceX stories to the M4 sample. Thirty-three tests and
+  compileall pass; independent pre-commit review passed after its three blocking findings were fixed.
 
 ## Blockers
 (none)

@@ -35,6 +35,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(count, 60)
         self.assertIn("fetched=60 new=60 deduped=5 pages=1", output.getvalue())
+    def test_research_command_reports_no_eligible_items(self) -> None:
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(output):
+            database = Path(tmp) / "fintick.db"
+            result = main(["research", "--database", str(database)])
+
+        self.assertEqual(result, 0)
+        self.assertIn("research selected=0 researched=0 errored=0", output.getvalue())
 
 
 if __name__ == "__main__":

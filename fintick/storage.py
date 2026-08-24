@@ -48,6 +48,19 @@ SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS enrichments_status_idx ON enrichments(status, attempts)",
+    """
+    CREATE TABLE IF NOT EXISTS research (
+        uri TEXT PRIMARY KEY REFERENCES posts(uri) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK (status IN ('processing', 'complete', 'error')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_token TEXT,
+        query TEXT NOT NULL,
+        links_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT,
+        researched_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS research_status_idx ON research(status, attempts)",
     "CREATE INDEX IF NOT EXISTS posts_created_at_idx ON posts(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS posts_dedup_idx "
     "ON posts(normalized_hash, created_at)",
