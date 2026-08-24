@@ -5,13 +5,13 @@
      then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M2 — ingest + SQLite storage, built and tested offline against the 60-post fixture.
+**Current milestone:** M3 — normalized-hash deduplication and canonical linkage.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 
 - [x] **M1 — Repo skeleton.** git init (branch main), README (with provenance line), LICENSE (MIT),
       .gitignore (data/, *.db, logs/, caches, __pycache__). Directory layout decided.
-- [ ] **M2 — Ingest + storage.** Fetch author feed (offline via reference/feed_sample.json first),
+- [x] **M2 — Ingest + storage.** Fetch author feed (offline via reference/feed_sample.json first),
       SQLite schema, store raw posts idempotently (uri = PK). Pagination-to-last-seen.
 - [ ] **M3 — Dedup.** Normalize + hash + windowed collapse of ALLCAPS/Title-Case reposts;
       canonical vs duplicate rows. Verify it collapses the known dupes in the fixture.
@@ -31,6 +31,11 @@ STATUS: IN PROGRESS
   test, and `python3 -m fintick doctor`.
 - Offline fixture shape verified: 60 newest-first author-feed entries plus an opaque cursor; each
   entry wraps `post`, with source text/timestamp under `post.record`.
+- 2026-08-24 / M2: Added a WAL-mode SQLite store keyed by post URI, retained compact raw JSON and
+  source metadata, and persisted newest URI/timestamp high-water marks. The stdlib AppView client
+  builds unauthenticated `posts_no_replies` requests and the paginator stops at an entirely known
+  page or an eight-page cap. Offline CLI verification inserted 60 posts on the first run and 0 on
+  the second; six unit tests pass, including multi-page traversal and high-water correctness.
 
 ## Blockers
 (none)

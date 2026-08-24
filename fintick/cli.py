@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from fintick import __version__
+from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +24,22 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="check the local runtime before starting FinTick",
     )
+    ingest = subparsers.add_parser(
+        "ingest",
+        help="fetch and store the fintwitter author feed",
+    )
+    ingest.add_argument(
+        "--database", default="data/fintick.db", help="SQLite database path"
+    )
+    ingest.add_argument(
+        "--fixture", help="offline AppView JSON fixture (never contacts Bluesky)"
+    )
+    ingest.add_argument(
+        "--max-pages", type=int, default=8, help="maximum live pages per run"
+    )
+    ingest.add_argument(
+        "--actor", default="fintwitter.bsky.social", help="Bluesky handle or DID"
+    )
     return parser
 
 
@@ -32,6 +49,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "doctor":
         print(f"FinTick {__version__}: Python runtime ready")
+        return 0
+
+    if args.command == "ingest":
+        if args.fixture:
+            stats = ingest_fixture(args.fixture, args.database)
+        else:
+            client = BlueskyFeedClient(args.actor)
+            stats = ingest_author_feed(
+                client.fetch_page, args.database, max_pages=args.max_pages
+            )
+        print(
+            f"ingest fetched={stats.fetched} new={stats.inserted} "
+            f"pages={stats.pages}"
+        )
         return 0
 
     parser.print_help()

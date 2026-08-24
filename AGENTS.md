@@ -74,3 +74,13 @@ expected. Treat `STATUS.md` as your memory between fires.
 Small, legible, dependency-light code that a human can read; resilient to bad model output and
 network hiccups; idempotent; and a dashboard that genuinely feels like a live financial tape.
 Favor finishing the core loop end-to-end over polishing any single part.
+
+---
+
+## Headless tooling — CONFIRMED constraints (read this)
+
+You run in a **headless cron context** with no human present to approve tool calls. Verified on the first build fire:
+
+- **`execute_code` is BLOCKED here** (it runs arbitrary Python that bypasses shell-string approval, which is disallowed without an approver). Do **not** call it — you will just waste a turn. Use the **`terminal`** tool to run everything: `python3 script.py`, `git`, `curl`, etc. The `terminal` tool works fine.
+- **Browser / CDP tools are UNAVAILABLE** in this context. For PRD F4 ("related stories" research), do the lookup from the **`terminal`** tool with **`curl`** against a free source (a public news/search JSON API, or an RSS feed you parse with stdlib) — not a browser. If no research path is reachable at build time, implement the code path anyway and cover it with a **stubbed test** (acceptance criterion #4 explicitly allows this), and note the limitation in STATUS.md.
+- Everything else (read_file, write_file, search_files, terminal) is available and working.

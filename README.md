@@ -17,9 +17,10 @@ No cloud AI. No paid market-data API. No triplicate headlines.
 
 ## Status
 
-FinTick is under active autonomous construction. The repository foundation is
-runnable; ingest, deduplication, enrichment, research, and the dashboard arrive
-in successive milestone commits. `STATUS.md` is the current source of truth.
+FinTick is under active autonomous construction. Durable Bluesky ingest now runs
+both offline and live, including pagination-to-last-seen and idempotent SQLite
+storage. Deduplication, enrichment, research, and the dashboard arrive in
+successive milestone commits. `STATUS.md` is the current source of truth.
 
 ## Quick start
 
@@ -41,10 +42,11 @@ Once the pipeline milestones land, the main commands will be separate,
 restart-safe processes:
 
 ```bash
-python3 -m fintick ingest --offline reference/feed_sample.json
-python3 -m fintick enrich
-python3 -m fintick research
-python3 -m fintick serve
+# Offline proving run (never contacts Bluesky)
+python3 -m fintick ingest --fixture reference/feed_sample.json
+
+# Live public AppView run; follows up to eight pages by default
+python3 -m fintick ingest
 ```
 
 The production database lives at `data/fintick.db`. Runtime data, logs, caches,
