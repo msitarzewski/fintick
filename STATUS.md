@@ -5,7 +5,7 @@
      then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M6 — live dashboard and scrolling tape.
+**Current milestone:** M7 — long-lived processes, supervisor install script, and live smoke test.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 
@@ -18,7 +18,7 @@ STATUS: IN PROGRESS
 - [x] **M4 — Enrich (local Qwen).** Structured tagging via localhost:11434: summary, category,
       importance, sentiment, instruments (global symbols), entities, regions. Resilient to bad output.
 - [x] **M5 — Research.** Web lookup of related stories for importance ≥ 3 items; attach links; cache.
-- [ ] **M6 — Dashboard.** Auto-refreshing tape + enriched cards; dark terminal aesthetic; symbol chips.
+- [x] **M6 — Dashboard.** Auto-refreshing tape + enriched cards; dark terminal aesthetic; symbol chips.
 - [ ] **M7 — Run-as-process.** Long-lived processes; self-test with setsid/nohup; write
       setup-fintick-supervisor.sh for Michael. Live smoke test against the real API.
 - [ ] **M8 — Acceptance pass.** Walk PRD §7 items 1–7; confirm each; polish README with a real
@@ -59,6 +59,15 @@ STATUS: IN PROGRESS
   resilience, failure isolation, RSS parsing, and rate-limit behavior. A one-request live smoke test
   attached two genuinely related NVIDIA/SpaceX stories to the M4 sample. Thirty-three tests and
   compileall pass; independent pre-commit review passed after its three blocking findings were fixed.
+- 2026-08-24 / M6: Added a dependency-free threaded HTTP dashboard with a self-contained dark
+  terminal UI, continuously scrolling canonical-headline tape, responsive signal cards, category
+  colors, importance marks, sentiment and direction-aware symbol chips, researched links, and a
+  20-second JSON refresh loop. Raw posts render immediately while analysis is pending; malformed
+  enrichment/research data degrades safely. The server initializes SQLite once before accepting
+  concurrent requests, orders offset timestamps by actual instant, and exposes only validated
+  HTTP(S) related links. Offline runtime verification served the 60-post fixture as 55 canonical
+  signals; 43 tests and compileall pass, including 40 concurrent HTTP reads. Independent review
+  passed after its two blocking findings were fixed.
 
 ## Blockers
 (none)

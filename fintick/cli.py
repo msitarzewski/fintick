@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from fintick import __version__
+from fintick.dashboard import serve_dashboard
 from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
 from fintick.research import research_pending
@@ -70,6 +71,18 @@ def build_parser() -> argparse.ArgumentParser:
     research.add_argument(
         "--max-attempts", type=int, default=3, help="retry cap per post"
     )
+    serve = subparsers.add_parser(
+        "serve", help="serve the live financial tape dashboard"
+    )
+    serve.add_argument(
+        "--database", default="data/fintick.db", help="SQLite database path"
+    )
+    serve.add_argument(
+        "--host", default="127.0.0.1", help="interface to bind (default: loopback)"
+    )
+    serve.add_argument(
+        "--port", type=int, default=8080, help="HTTP port (default: 8080)"
+    )
     return parser
 
 
@@ -114,6 +127,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"research selected={stats.selected} researched={stats.researched} "
             f"errored={stats.errored}"
         )
+        return 0
+
+    if args.command == "serve":
+        serve_dashboard(args.database, host=args.host, port=args.port)
         return 0
 
     parser.print_help()
