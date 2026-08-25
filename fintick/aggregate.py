@@ -415,8 +415,9 @@ def call_inference(
     payload = json.dumps({
         "model": model,
         "stream": False,
-        "temperature": 0.1,
-        "max_tokens": 4096,
+        # GPT-5.x requires max_completion_tokens (not max_tokens) and rejects any non-default
+        # temperature; response_format json_object constrains output regardless.
+        "max_completion_tokens": 4096,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
