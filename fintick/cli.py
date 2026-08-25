@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--host", default="127.0.0.1", help="interface to bind (default: loopback)"
     )
     serve.add_argument(
-        "--port", type=int, default=8080, help="HTTP port (default: 8080)"
+        "--port", type=int, default=8137, help="HTTP port (default: 8137)"
     )
     return parser
 

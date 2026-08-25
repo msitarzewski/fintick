@@ -1,4 +1,4 @@
-"""Self-contained live dashboard and JSON feed for FinTick."""
+"""Self-contained v2 event board and JSON API for FinTick."""
 
 from __future__ import annotations
 
@@ -11,89 +11,61 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
-from fintick.storage import open_database
+from fintick.storage import load_events, open_database
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 250
+STATUS_ORDER = {"breaking": 0, "contradicted": 1, "developing": 2, "confirmed": 3}
 
 
-def _json_array(value: Any) -> list[Any]:
-    """Decode a stored JSON array without letting stale data break the feed."""
-    if not isinstance(value, str):
+def _safe_validations(value: Any) -> list[dict[str, Any]]:
+    """Keep only display-safe HTTP(S) external stories."""
+    if not isinstance(value, list):
         return []
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    return decoded if isinstance(decoded, list) else []
-
-
-def _related_links(value: Any) -> list[dict[str, str]]:
-    """Return only display-safe HTTP(S) research links from durable storage."""
-    links: list[dict[str, str]] = []
-    for item in _json_array(value):
+    safe: list[dict[str, Any]] = []
+    for item in value:
         if not isinstance(item, dict):
             continue
-        title, url, source = item.get("title"), item.get("url"), item.get("source")
-        if not isinstance(title, str) or not isinstance(url, str):
+        url = item.get("url")
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        if not parsed or parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
-        clean_title = title.strip()
-        clean_url = url.strip()
-        parsed = urlsplit(clean_url)
-        if not clean_title or parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            continue
-        clean_source = source.strip() if isinstance(source, str) else parsed.netloc
-        links.append({"title": clean_title, "url": clean_url, "source": clean_source})
-    return links
+        safe.append({
+            "url": url,
+            "title": item.get("title") if isinstance(item.get("title"), str) else url,
+            "publisher": (
+                item.get("publisher")
+                if isinstance(item.get("publisher"), str)
+                else parsed.netloc.removeprefix("www.")
+            ),
+            "stance": item.get("stance"),
+            "published_at": item.get("published_at"),
+        })
+    return safe
 
 
 def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-    """Return latest canonical posts with optional enrichment and research."""
+    """Return validation-prioritized event cards for the board."""
     if limit < 1:
         raise ValueError("limit must be positive")
     limit = min(limit, MAX_LIMIT)
-    connection = sqlite3.connect(database, timeout=10)
-    connection.row_factory = sqlite3.Row
-    try:
-        rows = connection.execute(
-            """
-            SELECT p.uri, p.text, p.created_at,
-                   e.status AS enrichment_status, e.summary, e.category,
-                   e.importance, e.sentiment, e.instruments_json,
-                   e.entities_json, e.regions_json,
-                   r.status AS research_status, r.links_json
-            FROM posts AS p
-            LEFT JOIN enrichments AS e ON e.uri=p.uri
-            LEFT JOIN research AS r ON r.uri=p.uri
-            WHERE p.is_duplicate=0
-            ORDER BY julianday(p.created_at) DESC, p.uri DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    finally:
-        connection.close()
-
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        complete = row["enrichment_status"] == "complete"
-        items.append({
-            "uri": row["uri"],
-            "headline": row["text"],
-            "created_at": row["created_at"],
-            "enrichment_status": row["enrichment_status"] or "pending",
-            "summary": row["summary"] if complete else None,
-            "category": row["category"] if complete else None,
-            "importance": row["importance"] if complete else None,
-            "sentiment": row["sentiment"] if complete else None,
-            "instruments": _json_array(row["instruments_json"]) if complete else [],
-            "entities": _json_array(row["entities_json"]) if complete else [],
-            "regions": _json_array(row["regions_json"]) if complete else [],
-            "related": (
-                _related_links(row["links_json"])
-                if row["research_status"] == "complete" else []
-            ),
-        })
+    with open_database(database) as connection:
+        events = load_events(connection, limit=None)
+    for event in events:
+        event["validations"] = _safe_validations(event.get("validations"))
+    events.sort(key=lambda event: (
+        STATUS_ORDER.get(str(event.get("status")), 9),
+        str(event.get("first_seen_at", "")),
+        int(event.get("id", 0)),
+    ))
+    # Keep each status group newest-first without letting recency outrank urgency.
+    ordered: list[dict[str, Any]] = []
+    for status in ("breaking", "contradicted", "developing", "confirmed"):
+        group = [event for event in events if event.get("status") == status]
+        group.sort(key=lambda event: (str(event.get("first_seen_at", "")), int(event["id"])), reverse=True)
+        ordered.extend(group)
+    ordered.extend(event for event in events if event.get("status") not in STATUS_ORDER)
+    items = ordered[:limit]
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "count": len(items),
@@ -107,180 +79,64 @@ DASHBOARD_HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>FinTick — Local Financial Intelligence</title>
+<title>FinTick — The Edge Board</title>
 <style>
 :root {
-  --night: #090c0b; --surface: #101613; --surface-2: #151d18;
-  --line: #28352d; --text: #d9e4db; --muted: #91a096;
-  --green: #63d391; --red: #f07d72; --amber: #e4b75c; --cyan: #71c7cf;
-  --purple: #b99be8; --blue: #7ea8e5; --orange: #e29864; --slate: #9ca8a1;
+  --night:#0b0d0c; --surface:#121513; --lift:#181c19; --line:#303630;
+  --text:#e2e7e3; --muted:#98a29b; --dim:#687169;
+  --breaking:#ff6b61; --confirmed:#62d391; --developing:#e7b95b;
+  --contradicted:#cf8cff; --cyan:#75cbd0; --amber:#e0a765;
 }
-* { box-sizing: border-box; }
-html { background: var(--night); color: var(--text); font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
-body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 80% 0%, #17231d 0, transparent 32rem), var(--night); }
-.skip { position: absolute; left: -9999px; }
-.skip:focus { left: 12px; top: 12px; z-index: 10; padding: 10px; background: var(--amber); color: var(--night); }
-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px clamp(16px, 4vw, 56px) 18px; border-bottom: 1px solid var(--line); }
-.brand { display: flex; align-items: baseline; gap: 14px; }
-h1 { margin: 0; color: var(--amber); font-size: clamp(22px, 3vw, 32px); letter-spacing: -.06em; }
-.brand span { color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
-.status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
-.pulse.error { background: var(--red); box-shadow: 0 0 10px var(--red); }
-.tape { overflow: hidden; border-bottom: 1px solid var(--line); background: #0c110e; white-space: nowrap; }
-.tape-track { display: inline-flex; min-width: max-content; animation: crawl var(--duration, 60s) linear infinite; }
-.tape:hover .tape-track, .tape:focus-within .tape-track { animation-play-state: paused; }
-.tape-group { display: inline-flex; }
-.tick { display: inline-flex; align-items: center; gap: 10px; padding: 13px 26px 13px 0; font-size: 13px; }
-.tick::before { content: "◆"; color: var(--line); margin-right: 16px; font-size: 8px; }
-.tick-symbol { font-weight: 700; color: var(--amber); }
-.tick-symbol.up { color: var(--green); } .tick-symbol.down { color: var(--red); }
-@keyframes crawl { to { transform: translateX(-50%); } }
-main { width: min(1280px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 72px; }
-.feed-head { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin-bottom: 18px; }
-h2 { margin: 0; font-size: 15px; letter-spacing: .14em; text-transform: uppercase; }
-#updated { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.feed { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 14px; }
-.card { position: relative; min-width: 0; padding: 20px; border: 1px solid var(--line); border-left: 3px solid var(--category, var(--slate)); background: linear-gradient(135deg, rgba(255,255,255,.018), transparent 50%), var(--surface); }
-.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
-.meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.category { color: var(--category, var(--slate)); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
-.time { color: var(--muted); font-size: 10px; }
-.importance { letter-spacing: 2px; color: var(--amber); font-size: 10px; white-space: nowrap; }
-.importance span { color: #3e493f; }
-.headline { margin: 0 0 10px; color: var(--text); font: 600 clamp(15px, 1.5vw, 18px)/1.42 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
-.summary { margin: 0; color: #b4c1b7; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
-.pending { display: inline-block; margin-top: 10px; color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
-.chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
-.chip { display: inline-flex; gap: 6px; align-items: center; padding: 5px 8px; border: 1px solid #35443a; background: var(--surface-2); color: #cad5cc; font-size: 11px; }
-.chip.up { border-color: #2d6745; color: var(--green); } .chip.down { border-color: #73433f; color: var(--red); }
-.arrow { font-size: 10px; }
-.sentiment { color: var(--muted); font-size: 10px; text-transform: uppercase; }
-.related { margin: 17px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); list-style: none; }
-.related li + li { margin-top: 8px; }
-.related a { color: var(--cyan); font-size: 11px; line-height: 1.4; text-decoration: none; }
-.related a:hover { text-decoration: underline; } .related a:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
-.source { color: var(--muted); }
-.empty { grid-column: 1 / -1; padding: 80px 24px; border: 1px dashed var(--line); color: var(--muted); text-align: center; line-height: 1.8; }
-.error-message { color: var(--red); }
-footer { padding: 20px; border-top: 1px solid var(--line); color: #66736a; text-align: center; font-size: 10px; letter-spacing: .08em; }
-.cat-commodities { --category: var(--amber); } .cat-equities { --category: var(--green); }
-.cat-macro { --category: var(--cyan); } .cat-central-bank { --category: var(--purple); }
-.cat-geopolitics { --category: var(--red); } .cat-fx { --category: var(--blue); }
-.cat-rates { --category: var(--orange); } .cat-crypto { --category: #d9c16f; }
-@media (max-width: 620px) { header { align-items: flex-start; } .brand { display: block; } .brand span { display: block; margin-top: 5px; } .feed { grid-template-columns: 1fr; } }
-@media (prefers-reduced-motion: reduce) { .tape-track { animation: none; } }
+*{box-sizing:border-box} html{background:var(--night);color:var(--text);font-family:"IBM Plex Mono","SFMono-Regular",Consolas,monospace}
+body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% -10%,#252017 0,transparent 31rem),radial-gradient(circle at 90% 10%,#13231b 0,transparent 35rem),var(--night)}
+.skip{position:absolute;left:-9999px}.skip:focus{left:16px;top:16px;z-index:5;background:var(--amber);color:var(--night);padding:12px}
+header{padding:24px clamp(18px,4vw,60px) 18px;border-bottom:1px solid var(--line)}
+.header-row{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.brand{display:flex;align-items:baseline;gap:15px}
+h1{margin:0;color:var(--amber);font-size:clamp(24px,3vw,34px);letter-spacing:-.07em}.brand span{font-size:10px;letter-spacing:.17em;text-transform:uppercase;color:var(--muted)}
+.connection{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;letter-spacing:.12em}.pulse{width:8px;height:8px;border-radius:50%;background:var(--confirmed);box-shadow:0 0 12px var(--confirmed)}.pulse.error{background:var(--breaking);box-shadow:0 0 12px var(--breaking)}
+.metrics{display:flex;flex-wrap:wrap;gap:20px;margin-top:24px}.metric{min-width:108px}.metric b{display:block;font-size:22px;line-height:1.1}.metric span{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.13em}.metric.breaking b{color:var(--breaking)}
+.tape{overflow:hidden;border-bottom:1px solid var(--line);background:#0e110f;white-space:nowrap}.tape-track{display:inline-flex;min-width:max-content;animation:crawl var(--duration,50s) linear infinite}.tape:hover .tape-track{animation-play-state:paused}.tape-group{display:inline-flex}.tick{padding:11px 28px 11px 0;font-size:11px;color:var(--muted)}.tick::before{content:"◆";color:var(--line);margin:0 18px}.tick.breaking{color:var(--breaking)}.tick.confirmed{color:var(--confirmed)}
+@keyframes crawl{to{transform:translateX(-50%)}}
+main{width:min(1320px,calc(100% - 32px));margin:0 auto;padding:38px 0 76px}.board-head{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.board-head h2{margin:0;font-size:15px;letter-spacing:.15em;text-transform:uppercase}.board-head p{margin:7px 0 0;color:var(--muted);font-size:11px}.updated{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+.feed{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:16px}.card{position:relative;min-width:0;padding:22px;border:1px solid var(--line);border-top:3px solid var(--state);background:linear-gradient(145deg,rgba(255,255,255,.025),transparent 45%),var(--surface)}.card.breaking{--state:var(--breaking);background:linear-gradient(145deg,rgba(255,107,97,.10),transparent 48%),var(--surface);box-shadow:0 0 0 1px rgba(255,107,97,.09),0 15px 50px rgba(0,0,0,.22)}.card.confirmed{--state:var(--confirmed)}.card.developing{--state:var(--developing)}.card.contradicted{--state:var(--contradicted)}
+.badge{display:inline-flex;align-items:center;min-height:32px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--state) 55%,transparent);background:color-mix(in srgb,var(--state) 11%,transparent);color:var(--state);font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}.badge::before{content:"";width:7px;height:7px;border-radius:50%;margin-right:8px;background:var(--state);box-shadow:0 0 9px var(--state)}
+.card-meta{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:16px}.importance{color:var(--amber);font-size:9px;letter-spacing:2px}.importance i{color:#424941;font-style:normal}.headline{margin:0 0 10px;font:650 clamp(17px,1.7vw,21px)/1.38 "IBM Plex Mono","SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere}.summary{margin:0;color:#bcc5be;font-size:13px;line-height:1.6}.origin{margin-top:14px;color:var(--muted);font-size:10px;letter-spacing:.04em}.origin strong{color:var(--text)}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-top:18px}.fact{padding:10px;border:1px solid #303831;background:var(--lift)}.fact b{display:block;color:var(--text);font-size:14px;margin-bottom:3px}.fact span{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}.chip{padding:5px 8px;border:1px solid #384039;background:var(--lift);font-size:10px}.chip.up{color:var(--confirmed);border-color:#356347}.chip.down{color:var(--breaking);border-color:#6c403d}
+.sources{margin:18px 0 0;padding:15px 0 0;border-top:1px solid var(--line);list-style:none}.sources li+li{margin-top:9px}.sources a{color:var(--cyan);font-size:11px;line-height:1.45;text-decoration:underline;text-decoration-color:rgba(117,203,208,.35);text-underline-offset:3px}.sources a:focus-visible{outline:2px solid var(--amber);outline-offset:3px}.publisher{color:var(--muted);font-size:10px}.lag{margin-top:12px;color:var(--confirmed);font-size:10px}.empty{grid-column:1/-1;padding:90px 24px;border:1px dashed var(--line);color:var(--muted);text-align:center;line-height:1.8}.error-message{color:var(--breaking)}
+footer{padding:20px;border-top:1px solid var(--line);color:var(--dim);text-align:center;font-size:9px;letter-spacing:.1em}
+@media(max-width:640px){.header-row{align-items:flex-start}.board-head{align-items:flex-start;flex-direction:column;gap:10px}.brand{display:block}.brand span{display:block;margin-top:6px}.feed{grid-template-columns:1fr}.metrics{gap:14px}.metric{min-width:82px}}
+@media(prefers-reduced-motion:reduce){.tape-track{animation:none}}
 </style>
 </head>
 <body>
-<a class="skip" href="#feed">Skip to live feed</a>
+<a class="skip" href="#feed">Skip to event board</a>
 <header>
-  <div class="brand"><h1>FinTick_</h1><span>local financial intelligence</span></div>
-  <div class="status" role="status"><i class="pulse" id="pulse" aria-hidden="true"></i><span id="connection">CONNECTING</span></div>
+  <div class="header-row"><div class="brand"><h1>FinTick_</h1><span>ahead of the wire</span></div><div class="connection" role="status"><i class="pulse" id="pulse" aria-hidden="true"></i><span id="connection">CONNECTING</span></div></div>
+  <div class="metrics" id="metrics" aria-label="Event status summary"></div>
 </header>
-<section class="tape" aria-label="Latest headline ticker"><div class="tape-track" id="tape"></div></section>
-<main id="main">
-  <div class="feed-head"><h2>Signal feed</h2><span id="updated">Awaiting feed…</span></div>
-  <section class="feed" id="feed" aria-live="polite"><div class="empty">Loading the tape…</div></section>
+<section class="tape" aria-label="Latest event ticker"><div class="tape-track" id="tape"></div></section>
+<main>
+  <div class="board-head"><div><h2>The Edge Board</h2><p>What the stream caught—and whether the news has caught up.</p></div><span class="updated" id="updated">Awaiting events…</span></div>
+  <section class="feed" id="feed" aria-live="polite"><div class="empty">Loading the edge…</div></section>
 </main>
-<footer>FIN_TICK // FINANCIAL SIGNALS, LOCAL INFERENCE, ZERO CLOUD AI</footer>
+<footer>ONE STREAM // DISTINCT EVENTS // EXTERNAL VALIDATION // LOCAL INFERENCE</footer>
 <script>
 'use strict';
-const $ = id => document.getElementById(id);
-const categoryClass = value => 'cat-' + String(value || 'other').replace(/[^a-z-]/g, '');
-const safeDirection = value => ['up','down','flat'].includes(value) ? value : 'flat';
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-function relativeTime(value) {
-  const time = Date.parse(value); if (!Number.isFinite(time)) return 'time unknown';
-  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
-  if (seconds < 60) return seconds + 's ago';
-  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
-  if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
-  return Math.floor(seconds / 86400) + 'd ago';
-}
-function symbolLabel(instrument) {
-  const direction = safeDirection(instrument.direction);
-  return (direction === 'up' ? '▲ ' : direction === 'down' ? '▼ ' : '') + String(instrument.symbol || '');
-}
-function renderTape(items) {
-  const tape = $('tape'); tape.replaceChildren();
-  const visible = items.slice(0, 30);
-  if (!visible.length) { tape.append(element('span', 'tick', 'No signals yet')); return; }
-  function group(hidden) {
-    const node = element('div', 'tape-group'); if (hidden) node.setAttribute('aria-hidden', 'true');
-    for (const item of visible) {
-      const tick = element('span', 'tick');
-      const instrument = Array.isArray(item.instruments) ? item.instruments[0] : null;
-      if (instrument && instrument.symbol) tick.append(element('b', 'tick-symbol ' + safeDirection(instrument.direction), symbolLabel(instrument)));
-      tick.append(document.createTextNode(String(item.headline || ''))); node.append(tick);
-    }
-    return node;
-  }
-  tape.append(group(false), group(true));
-  tape.style.setProperty('--duration', Math.max(35, visible.length * 7) + 's');
-}
-function renderCard(item) {
-  const card = element('article', 'card ' + categoryClass(item.category));
-  const head = element('div', 'card-head'), meta = element('div', 'meta');
-  meta.append(element('span', 'category', item.category || 'raw signal'), element('time', 'time', relativeTime(item.created_at)));
-  head.append(meta);
-  if (Number.isInteger(item.importance)) {
-    const stars = element('span', 'importance'); stars.setAttribute('aria-label', 'Importance ' + item.importance + ' of 5');
-    stars.append(document.createTextNode('◆'.repeat(item.importance)), element('span', '', '◆'.repeat(5 - item.importance))); head.append(stars);
-  }
-  card.append(head, element('h3', 'headline', item.headline || 'Untitled signal'));
-  if (item.summary) card.append(element('p', 'summary', item.summary));
-  else card.append(element('span', 'pending', item.enrichment_status === 'error' ? 'Enrichment retry queued' : 'Raw signal · analysis pending'));
-  const instruments = Array.isArray(item.instruments) ? item.instruments : [];
-  if (instruments.length || item.sentiment) {
-    const chips = element('div', 'chips');
-    for (const instrument of instruments) {
-      const direction = safeDirection(instrument.direction), chip = element('span', 'chip ' + direction);
-      chip.title = String(instrument.name || instrument.symbol || 'Instrument');
-      chip.append(element('span', 'arrow', direction === 'up' ? '▲' : direction === 'down' ? '▼' : '—'), document.createTextNode(String(instrument.symbol || ''))); chips.append(chip);
-    }
-    if (item.sentiment) chips.append(element('span', 'sentiment', String(item.sentiment)));
-    card.append(chips);
-  }
-  const links = Array.isArray(item.related) ? item.related : [];
-  if (links.length) {
-    const list = element('ul', 'related');
-    for (const story of links) {
-      if (!story || !story.url) continue;
-      const li = element('li'), link = element('a', '', String(story.title || story.url));
-      link.href = String(story.url); link.target = '_blank'; link.rel = 'noopener noreferrer';
-      li.append(link); if (story.source) li.append(document.createTextNode(' '), element('span', 'source', '— ' + story.source)); list.append(li);
-    }
-    if (list.childNodes.length) card.append(list);
-  }
-  return card;
-}
-function render(data) {
-  const items = Array.isArray(data.items) ? data.items : [], feed = $('feed');
-  renderTape(items); feed.replaceChildren();
-  if (!items.length) feed.append(element('div', 'empty', 'The tape is quiet. Ingested signals will appear here automatically.'));
-  else for (const item of items) feed.append(renderCard(item));
-  const generated = new Date(data.generated_at);
-  $('updated').textContent = Number.isNaN(generated.valueOf()) ? items.length + ' signals' : items.length + ' signals · updated ' + generated.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-  $('connection').textContent = 'LIVE'; $('pulse').classList.remove('error');
-}
-let refreshInFlight = false;
-async function refresh() {
-  if (refreshInFlight) return;
-  refreshInFlight = true;
-  try {
-    const response = await fetch('/api/feed', {cache: 'no-store'}); if (!response.ok) throw new Error('HTTP ' + response.status);
-    render(await response.json());
-  } catch (error) {
-    $('connection').textContent = 'RECONNECTING'; $('pulse').classList.add('error');
-    if (!$('feed').querySelector('.card')) { const msg = element('div', 'empty error-message', 'Feed unavailable. FinTick will retry automatically.'); $('feed').replaceChildren(msg); }
-  } finally { refreshInFlight = false; }
-}
+const $=id=>document.getElementById(id);
+function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node}
+function relativeTime(value){const time=Date.parse(value);if(!Number.isFinite(time))return'time unknown';const s=Math.max(0,Math.round((Date.now()-time)/1000));if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
+function safeStatus(value){return['breaking','confirmed','contradicted','developing'].includes(value)?value:'developing'}
+function badgeText(item){const n=Array.isArray(item.validations)?item.validations.length:0;switch(safeStatus(item.status)){case'breaking':return'BREAKING — no corroboration yet';case'confirmed':return'CONFIRMED — '+n+' source'+(n===1?'':'s');case'contradicted':return'CONTRADICTED';default:return'DEVELOPING'}}
+function lagText(seconds){if(!Number.isFinite(seconds))return'';const abs=Math.abs(seconds),value=abs<3600?Math.round(abs/60)+' min':(abs/3600).toFixed(1)+' hr';return seconds>=0?'news +'+value+' after the stream':'news '+value+' before the stream'}
+function renderMetrics(items){const metrics=$('metrics');metrics.replaceChildren();for(const [status,label] of [['breaking','breaking now'],['confirmed','confirmed'],['developing','developing'],['contradicted','contradicted']]){const box=element('div','metric '+status);box.append(element('b','',String(items.filter(x=>x.status===status).length)),element('span','',label));metrics.append(box)}}
+function renderTape(items){const tape=$('tape');tape.replaceChildren();if(!items.length){tape.append(element('span','tick','No events yet'));return}function group(hidden){const node=element('div','tape-group');if(hidden)node.setAttribute('aria-hidden','true');for(const item of items.slice(0,24))node.append(element('span','tick '+safeStatus(item.status),String(item.headline||'')));return node}tape.append(group(false),group(true));tape.style.setProperty('--duration',Math.max(38,items.length*8)+'s')}
+function renderCard(item){const status=safeStatus(item.status),card=element('article','card '+status);const meta=element('div','card-meta');meta.append(element('span','badge',badgeText(item)));if(Number.isInteger(item.importance)){const rank=element('span','importance');rank.setAttribute('aria-label','Importance '+item.importance+' of 5');rank.append(document.createTextNode('◆'.repeat(item.importance)),element('i','', '◆'.repeat(5-item.importance)));meta.append(rank)}card.append(meta,element('h3','headline',String(item.headline||'Untitled event')));if(item.summary)card.append(element('p','summary',String(item.summary)));const origin=element('p','origin');origin.append(document.createTextNode('via the stream · seen '),element('strong','',String(item.stream_seen||0)+'×'),document.createTextNode(' · '+relativeTime(item.first_seen_at)));card.append(origin);
+const facts=Array.isArray(item.facts)?item.facts:[];if(facts.length){const grid=element('div','facts');for(const fact of facts){if(!fact||fact.value===undefined)continue;const node=element('div','fact');node.append(element('b','',String(fact.value)+(fact.unit?' '+fact.unit:'')),element('span','',String(fact.label||'fact')));grid.append(node)}if(grid.childNodes.length)card.append(grid)}
+const instruments=Array.isArray(item.instruments)?item.instruments:[];if(instruments.length){const chips=element('div','chips');for(const instrument of instruments){const direction=['up','down','flat'].includes(instrument.direction)?instrument.direction:'flat';const marker=direction==='up'?'▲ ':direction==='down'?'▼ ':'— ';const chip=element('span','chip '+direction,marker+String(instrument.symbol||instrument.name||''));chip.title=String(instrument.name||instrument.symbol||'Instrument');chips.append(chip)}card.append(chips)}
+const links=Array.isArray(item.validations)?item.validations:[];if(links.length){const list=element('ul','sources');for(const story of links){if(!story||!story.url)continue;const li=element('li'),link=element('a','',String(story.title||story.url));link.href=String(story.url);link.target='_blank';link.rel='noopener noreferrer';li.append(link,document.createTextNode(' '),element('span','publisher','— '+String(story.publisher||'external news')));list.append(li)}if(list.childNodes.length)card.append(list)}const lag=lagText(item.lead_seconds);if(lag)card.append(element('p','lag',lag));return card}
+function render(data){const items=Array.isArray(data.items)?data.items:[],feed=$('feed');renderMetrics(items);renderTape(items);feed.replaceChildren();if(!items.length)feed.append(element('div','empty','No aggregated events yet. Ingest the stream, then run FinTick aggregate.'));else for(const item of items)feed.append(renderCard(item));const generated=new Date(data.generated_at);$('updated').textContent=Number.isNaN(generated.valueOf())?items.length+' events':items.length+' events · updated '+generated.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});$('connection').textContent='LIVE';$('pulse').classList.remove('error')}
+let refreshInFlight=false;async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const response=await fetch('/api/feed',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);render(await response.json())}catch(error){$('connection').textContent='RECONNECTING';$('pulse').classList.add('error');if(!$('feed').querySelector('.card'))$('feed').replaceChildren(element('div','empty error-message','Event feed unavailable. FinTick will retry automatically.'))}finally{refreshInFlight=false}}
 refresh(); setInterval(refresh, 20000);
 </script>
 </body>
@@ -288,14 +144,11 @@ refresh(); setInterval(refresh, 20000);
 
 
 class DashboardServer(ThreadingHTTPServer):
-    """HTTP server carrying the database path used by request handlers."""
-
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], database: str | Path) -> None:
         self.database = Path(database)
-        # Run migrations once before accepting concurrent read requests.
         with open_database(self.database):
             pass
         super().__init__(address, DashboardHandler)
@@ -308,11 +161,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+            "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        )
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_GET(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
         if parts.path in {"/", "/index.html"}:
             self._send(HTTPStatus.OK, DASHBOARD_HTML.encode(), "text/html; charset=utf-8")
@@ -320,15 +177,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parts.path == "/api/feed":
             raw_limit = parse_qs(parts.query).get("limit", [str(DEFAULT_LIMIT)])[0]
             try:
-                limit = int(raw_limit)
                 server = cast(DashboardServer, self.server)
-                payload = read_feed(server.database, limit=limit)
+                payload = read_feed(server.database, limit=int(raw_limit))
             except ValueError as error:
-                self._send(HTTPStatus.BAD_REQUEST, json.dumps({"error": str(error)}).encode(), "application/json")
+                self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    json.dumps({"error": str(error)}).encode(),
+                    "application/json",
+                )
                 return
             except (OSError, sqlite3.Error) as error:
                 self.log_error("feed read failed: %s", error)
-                self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b'{"error":"feed unavailable"}', "application/json")
+                self._send(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    b'{"error":"feed unavailable"}',
+                    "application/json",
+                )
                 return
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
             self._send(HTTPStatus.OK, body, "application/json; charset=utf-8")
@@ -339,8 +203,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         print(f"dashboard {self.address_string()} {format % args}", flush=True)
 
 
-def serve_dashboard(database: str | Path, *, host: str = "127.0.0.1", port: int = 8080) -> None:
-    """Serve the dashboard until interrupted."""
+def serve_dashboard(database: str | Path, *, host: str = "127.0.0.1", port: int = 8137) -> None:
+    """Serve the event board until interrupted."""
     if not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
     server = DashboardServer((host, port), database)

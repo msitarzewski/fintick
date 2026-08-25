@@ -4,7 +4,7 @@
      one-paragraph summary, then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M5 — v2 event dashboard (M4 validation done 2026-08-25).
+**Current milestone:** M6 — final acceptance and process wiring (M5 dashboard done 2026-08-25).
 
 ## The v2 pivot (read this first every fire)
 v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
@@ -52,10 +52,15 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       `breaking` result; rerunning the same event with a stubbed corroborating story flips it to
       `confirmed` with the URL and a verified 600-second wire lag. Lookup failures are isolated and
       retained as event errors for retry. 69/69 tests green.
-- [ ] **M5 — Dashboard.** Event cards with the **validation badge front-and-center**; breaking events
+- [x] **M5 — Dashboard.** Event cards with the **validation badge front-and-center**; breaking events
       highlighted + sorted up; origin as "via the stream · seen N×" (NEVER "N sources"); lead time on
       confirmed. **Fix the v1 doubled-headline render bug** (title+text were concatenated).
       Dashboard port must be **non-8080** (e.g. 8137), configurable.
+      ✅ 2026-08-25: `/api/feed` now returns event cards, status-prioritized with breaking first. The
+      self-contained Edge Board renders focal validation badges, facts, instrument direction, the exact
+      stream-origin language, safe external links, and news lag; refreshes every 20s; defaults to 8137.
+      Desktop (1077px) and mobile (390px) renders were inspected live; a mobile heading/timestamp
+      collision found during inspection was fixed and re-verified. 67/67 tests green.
 - [ ] **M6 — Acceptance.** Walk PRD §7 1–7; NVDA fixture end-to-end → one `breaking` event with
       facts; update README for v2; `setup-fintick-supervisor.sh` correct (non-8080 port).
 
