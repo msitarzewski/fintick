@@ -1,6 +1,6 @@
 # FinTick — Product Requirements Document (v2: stream-signal + validation)
 
-> **Designed by Claude Opus 4.8 · Built by Qwen 3.8 27B via Hermes.**
+> **Designed by Claude Opus · Built with Qwen 3.8 and GPT 5.6 Sol via Hermes.**
 > This document is the product specification; provider and operations rules live in `AGENTS.md`.
 > Read `AGENTS.md` for how to work; read `reference/` for the facts you need.
 >
@@ -66,7 +66,9 @@ the F2 call or a second pass. Store as structured data on the event.
 When configured, use the authenticated common.vision Partner API index, which includes Google News
 feeds; retain direct public RSS as the no-token compatibility path. Social posts are not independent
 corroboration. Attach `validating_sources[]` `{url, title, publisher, stance,
-published_at}`. Set `status`:
+published_at, feed_name, feed_url, feed_type}`. For common.vision, `publisher` comes from
+`Article.metadata.source`; `Article.feed` is ingestion provenance and must not be counted as a second
+independent publisher. Set `status`:
 - **`breaking`** — a real event with **0 external validating sources found** → *the stream is ahead
   of the news.* This is a first-class, highlighted result, NOT a failure.
 - **`confirmed`** — ≥ 1 corroborating external source. Record how far behind the stream the news was
@@ -140,6 +142,6 @@ New schema alongside the existing `posts` table: `events`, `event_signals` (even
 ## 9. Provenance & identity
 
 - Project **FinTick**, repo `fintick`. `README.md` MUST prominently carry:
-  > **Designed by Claude Opus 4.8 · Built by Qwen 3.8 27B via Hermes.**
+  > **Designed by Claude Opus · Built with Qwen 3.8 and GPT 5.6 Sol via Hermes.**
 - Keep the tone proud, clear, a little playful about the human / AI / local-AI collaboration — and
   now about the **edge**: a local model catching breaking markets before the wire.

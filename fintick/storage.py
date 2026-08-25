@@ -200,6 +200,22 @@ def _migrate_post_aggregation_decisions(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_event_validation_provenance(connection: sqlite3.Connection) -> None:
+    """Add feed provenance to validation rows created before v2.1."""
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(event_validations)").fetchall()
+    }
+    additions = (
+        ("feed_name", "ALTER TABLE event_validations ADD COLUMN feed_name TEXT"),
+        ("feed_url", "ALTER TABLE event_validations ADD COLUMN feed_url TEXT"),
+        ("feed_type", "ALTER TABLE event_validations ADD COLUMN feed_type TEXT"),
+    )
+    for name, statement in additions:
+        if name not in columns:
+            connection.execute(statement)
+
+
 def _bootstrap_post_aggregation_decisions(connection: sqlite3.Connection) -> None:
     """Account for pre-v2.1 posts without pretending old history was reviewed."""
     rows = connection.execute(
@@ -268,6 +284,7 @@ def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
         for statement in V2_SCHEMA:
             connection.execute(statement)
         _migrate_post_aggregation_decisions(connection)
+        _migrate_event_validation_provenance(connection)
         _assert_event_signal_ownership(connection)
         _bootstrap_post_aggregation_decisions(connection)
         yield connection
@@ -403,6 +420,9 @@ V2_SCHEMA = (
         stance TEXT NOT NULL DEFAULT 'corroborating'
             CHECK (stance IN ('corroborating', 'disputing', 'partial')),
         published_at TEXT,
+        feed_name TEXT,
+        feed_url TEXT,
+        feed_type TEXT,
         collected_at TEXT NOT NULL,
         PRIMARY KEY (event_id, url)
     )
@@ -606,8 +626,8 @@ def upsert_event(connection: sqlite3.Connection, event: V2Event) -> tuple[int, b
             "SELECT first_seen_at, last_seen_at, importance FROM events WHERE id = ?",
             (event_id,),
         ).fetchone()
-        merged_first = min(existing_first, event.first_seen_at)
-        merged_last = max(existing_last, event.last_seen_at)
+        merged_first = min(existing_first, event.first_seen_at, key=_parse_timestamp)
+        merged_last = max(existing_last, event.last_seen_at, key=_parse_timestamp)
         if existing_importance is None:
             merged_importance = event.importance
         elif event.importance is None:
@@ -654,6 +674,9 @@ def record_validation(
     publisher: str | None,
     stance: str,
     published_at: str | None,
+    feed_name: str | None = None,
+    feed_url: str | None = None,
+    feed_type: str | None = None,
 ) -> bool:
     """Attach one external validating source; True when newly linked.
 
@@ -668,10 +691,14 @@ def record_validation(
     cursor = connection.execute(
         """
         INSERT OR IGNORE INTO event_validations (
-            event_id, url, title, publisher, stance, published_at, collected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            event_id, url, title, publisher, stance, published_at,
+            feed_name, feed_url, feed_type, collected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (event_id, url, title, publisher, stance, published_at, collected_at),
+        (
+            event_id, url, title, publisher, stance, published_at,
+            feed_name, feed_url, feed_type, collected_at,
+        ),
     )
     if cursor.rowcount == 1:
         return True
@@ -680,13 +707,19 @@ def record_validation(
         """
         UPDATE event_validations
         SET title = ?, publisher = ?, stance = ?,
+            feed_name = COALESCE(?, feed_name),
+            feed_url = COALESCE(?, feed_url),
+            feed_type = COALESCE(?, feed_type),
             published_at = CASE
                 WHEN julianday(published_at) IS NOT NULL THEN published_at
                 ELSE ?
             END
         WHERE event_id = ? AND url = ?
         """,
-        (title, publisher, stance, published_at, event_id, url),
+        (
+            title, publisher, stance, feed_name, feed_url, feed_type,
+            published_at, event_id, url,
+        ),
     )
     return False
 
@@ -735,16 +768,24 @@ def load_pipeline_health(connection: sqlite3.Connection) -> dict[str, Any]:
         (POST_AGGREGATION_MAX_ATTEMPTS,),
     ).fetchone()[0])
     terminal_errors = counts.get("errored", 0) - retrying
-    oldest_pending = connection.execute(
+    oldest_pending_row = connection.execute(
         """
-        SELECT MIN(p.created_at)
+        SELECT p.created_at
         FROM posts p
         JOIN post_aggregation_decisions d ON d.post_uri = p.uri
         WHERE d.state='pending' OR (d.state='errored' AND d.attempts < ?)
+        ORDER BY julianday(p.created_at) IS NULL, julianday(p.created_at), p.uri
+        LIMIT 1
         """,
         (POST_AGGREGATION_MAX_ATTEMPTS,),
-    ).fetchone()[0]
-    latest_post = connection.execute("SELECT MAX(created_at) FROM posts").fetchone()[0]
+    ).fetchone()
+    oldest_pending = oldest_pending_row[0] if oldest_pending_row else None
+    latest_post_row = connection.execute(
+        "SELECT created_at FROM posts "
+        "ORDER BY julianday(created_at) IS NULL, julianday(created_at) DESC, uri DESC "
+        "LIMIT 1"
+    ).fetchone()
+    latest_post = latest_post_row[0] if latest_post_row else None
     latest_decision = connection.execute(
         "SELECT MAX(updated_at) FROM post_aggregation_decisions "
         "WHERE state IN ('assigned', 'ignored', 'errored')"
@@ -798,7 +839,8 @@ def load_events(
         event_id = row[0]
         sources = connection.execute(
             """
-            SELECT url, title, publisher, stance, published_at, collected_at
+            SELECT url, title, publisher, stance, published_at, collected_at,
+                   feed_name, feed_url, feed_type
             FROM event_validations WHERE event_id = ?
             ORDER BY COALESCE(published_at, collected_at) DESC, collected_at DESC
             """,
@@ -826,6 +868,7 @@ def load_events(
                     {
                         "url": s[0], "title": s[1], "publisher": s[2],
                         "stance": s[3], "published_at": s[4], "collected_at": s[5],
+                        "feed_name": s[6], "feed_url": s[7], "feed_type": s[8],
                     }
                     for s in sources
                 ],

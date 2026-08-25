@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fintick.dashboard import DASHBOARD_HTML, DashboardServer, read_feed
 from fintick.ingest import ingest_fixture
+from fintick.service_handoff import snapshot_database
 from fintick.storage import (
     V2Event,
     open_database,
@@ -78,6 +79,19 @@ class DashboardFeedTests(EventBoardFixture):
         self.assertEqual(pipeline["terminal_errors"], 0)
         self.assertEqual(pipeline["oldest_pending_at"], "2026-08-24T15:00:11.000000+00:00")
 
+    def test_feed_identifies_exact_database_not_same_cardinality_copy(self) -> None:
+        copied_database = Path(self.tmp.name) / "copied.db"
+        snapshot_database(self.database, copied_database)
+
+        operational = read_feed(self.database)["pipeline"]
+        copied = read_feed(copied_database)["pipeline"]
+
+        self.assertEqual(operational["posts"], copied["posts"])
+        self.assertNotEqual(
+            operational["database_identity"],
+            copied["database_identity"],
+        )
+
     def test_breaking_events_sort_ahead_of_newer_confirmed_events(self) -> None:
         with open_database(self.database) as connection:
             confirmed_id, _ = upsert_event(connection, V2Event.from_key(
@@ -99,6 +113,9 @@ class DashboardFeedTests(EventBoardFixture):
                 publisher="Example Wire",
                 stance="corroborating",
                 published_at="2026-08-24T16:05:00+00:00",
+                feed_name="Google News — Business",
+                feed_url="https://news.google.com/rss/business",
+                feed_type="rss",
             )
             set_event_status(connection, confirmed_id, "confirmed", lead_seconds=300)
 
@@ -106,6 +123,12 @@ class DashboardFeedTests(EventBoardFixture):
 
         self.assertEqual([item["status"] for item in items], ["breaking", "confirmed"])
         self.assertEqual(items[1]["validations"][0]["publisher"], "Example Wire")
+        self.assertEqual(items[1]["validations"][0]["feed_name"], "Google News — Business")
+        self.assertEqual(
+            items[1]["validations"][0]["feed_url"],
+            "https://news.google.com/rss/business",
+        )
+        self.assertEqual(items[1]["validations"][0]["feed_type"], "rss")
         self.assertEqual(items[1]["lead_seconds"], 300)
 
     def test_limit_validation_and_cap(self) -> None:

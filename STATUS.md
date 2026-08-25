@@ -6,7 +6,7 @@ FinTick v2.1 is a verified release candidate: every new post enters a durable ac
 aggregation drains oldest pending work through short IDs; every selected ID must become one event signal,
 an explicit ignore, or a visible bounded error; failed subsets retry together. GPT-5.6 Luna is reached
 through Hermes-managed OAuth, with the local provider retained. The Edge Board exposes backlog and error
-health. All 104 tests, compile checks, shell syntax, and diff checks pass. Luna scored 100% accounting on
+health. All 143 tests, compile checks, shell syntax, and diff checks pass. Luna scored 100% accounting on
 the fixed 28-post corpus. Copied-live catch-up reached zero backlog with isolated retries exercised.
 Copied-live validation repair reduced unsupported confirmations from 20 to 7 and retained only
 claim-aligned evidence. The live Supervisor workers remain unchanged until the rootless user-systemd
@@ -103,7 +103,8 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
 - Oldest-pending batches replace newest-N sampling. Short IDs remove URI-copy failures. The parser rejects
   missing, duplicate, unknown, or multiply assigned IDs and requires explicit ignore reasons.
 - Provider failures and rejected posts retry at most three times. Durable retry groups preserve the exact
-  failed subset instead of mixing unrelated failures or fresh backlog.
+  failed subset instead of mixing unrelated failures or fresh backlog, even when the original group exceeds
+  a later caller's fresh-batch limit. Pending and health ordering compare UTC instants rather than ISO text.
 - Default provider is GPT-5.6 Luna through the existing Hermes `openai-codex` OAuth state. FinTick neither
   reads nor stores credentials. The one-shot subprocess uses safe mode plus Hermes' valid empty toolset, so
   untrusted stream text cannot invoke agent tools. Local Ollama remains dependency-injected for offline tests
@@ -121,6 +122,8 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
   current conservative matcher and unrelated candidates are removed before status is recalculated. On a fresh
   operational database copy with network lookup disabled, this repaired 20 historical confirmations to 7
   claim-aligned confirmations, 3 developing events, and 24 breaking events; stored candidates fell from 73 to 18.
+- External candidate stances are never trusted to bypass title-level claim matching. Lead-time calculation
+  requires timezone-aware event and publication timestamps, preventing host-timezone-dependent wire lag.
 - A bounded live-RSS smoke exposed one generic live-blog false positive (`US`, `Trump`, `removed`). A red
   regression now requires claim-specific evidence spanning context and fact values; the rerun removed that row,
   retained three on-claim Hormuz corroborations, and completed five validations with zero errors.
@@ -129,16 +132,36 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
   date-bounded and use broad two-anchor retrieval followed by the same conservative claim classifier. Social
   URLs are excluded as independent sources. A copied-live five-event smoke completed with zero errors and did
   not promote any weak candidates. The token lives outside the repository in a mode-0600 user environment file.
+- The supplied Partner API OpenAPI 3.0.3 contract is now captured in
+  `reference/common_vision_partner_api.md`. Article `metadata.source` is stored as the publisher while
+  `feed.name`, `feed.url`, and `feed.feed_type` are preserved separately through SQLite and `/api/feed`.
+  Existing databases gain those columns additively. HTTP 429 honors either `Retry-After` or the documented
+  JSON `retry_after`; 401/403/404/422/500 and malformed envelopes remain fail-closed validation errors.
 - Independent adversarial review exposed and drove regressions for three accounting/evidence defects: exhausted
   errors are now immutable, legacy-compatible model responses account for assigned and omitted posts, and the
   final validation-source boundary removes social URLs during both fresh lookup and historical revalidation.
   Social hosts are matched on normalized URL hostnames, including port, userinfo, subdomain, and trailing-dot
   disguises.
-- `setup-fintick-services.sh` follows this host's established rootless user-systemd pattern. It replaces the
-  obsolete Supervisor installer but has not yet been activated while the old root-owned workers are running.
+- `setup-fintick-services.sh` follows this host's established rootless user-systemd pattern. It rejects both
+  running workers, dormant FinTick Supervisor definitions, independent port collisions, and insecure
+  validation environment-file metadata; it
+  preserves WAL-safe database and prior unit-state snapshots, verifies exact-file API/database identity,
+  complete accounting, backlog movement, and unit liveness before and after bounded API polling. Failed
+  verification first proves every replacement unit inactive, then restores the database without stale
+  sidecars plus prior enabled/active unit state. Failed final replacement recovers the original main/WAL/SHM
+  family. Fresh installs wait for service activation to create the operational database before capturing
+  exact file identity. Prior writers remain stopped unless database recovery, every unit artifact, and the
+  user-systemd daemon reload all succeed. Prior and final unit states are
+  explicit recognized categories; unknown or transitional states abort or mark rollback incomplete.
+  Persistent and runtime unit masks are snapshotted, removed before replacement activation, and restored
+  exactly on rollback. Process preflight recognizes Python options and the installed console entrypoint.
+  Stop or restoration failures are reported explicitly
+  without claiming success, and the private snapshot remains available; both successful and failed handoffs
+  retain bounded journal evidence. It replaces the obsolete Supervisor
+  installer but has not yet been activated while the old root-owned workers are running.
 - `AGENTS.md` now defines provider-injected inference, durable accounting, conservative revalidation, and
   rootless user-systemd operations rather than preserving the historical local-Qwen/Supervisor build mandate.
-- Current verification: 104/104 tests, `compileall`, `bash -n`, and `git diff --check` pass.
+- Current verification: 143/143 tests, `compileall`, `bash -n`, and `git diff --check` pass.
 
 ## Notes / decisions
 - 2026-08-24: pivoted v1 → v2. Kept ingest + storage; replaced dedup/enrich/research with

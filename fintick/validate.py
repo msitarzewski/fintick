@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
@@ -25,7 +26,6 @@ COMMON_VISION_ENDPOINT = "https://common.vision/api/v1/articles"
 SOCIAL_VALIDATION_HOSTS = {
     "bsky.app", "facebook.com", "instagram.com", "threads.net", "twitter.com", "x.com",
 }
-STANCES = {"corroborating", "disputing", "partial"}
 NUMBER_WORDS = {
     "one": "1", "first": "1", "two": "2", "second": "2", "three": "3", "third": "3",
     "four": "4", "fourth": "4", "five": "5", "fifth": "5", "six": "6", "sixth": "6",
@@ -196,6 +196,26 @@ def search_external_news(
     return parse_validation_rss(payload, limit=limit)
 
 
+def _common_vision_retry_delay(error: urllib.error.HTTPError) -> float:
+    """Read partner rate-limit delay from the header or OpenAPI JSON body."""
+    def valid_delay(value: Any) -> float | None:
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            return None
+        return delay if math.isfinite(delay) else None
+
+    header_delay = valid_delay(error.headers.get("Retry-After"))
+    if header_delay is not None:
+        return header_delay
+    try:
+        document = json.loads(error.read(65_536))
+    except Exception:
+        return 5.0
+    body_delay = valid_delay(document.get("retry_after")) if isinstance(document, dict) else None
+    return body_delay if body_delay is not None else 5.0
+
+
 def search_common_vision(
     query: str,
     limit: int = 5,
@@ -215,7 +235,7 @@ def search_common_vision(
         for token in re.findall(r"[A-Za-z0-9]+", query)
         if token.lower() not in STOP_WORDS | COMMON_VISION_SEARCH_NOISE
     ]
-    compact_query = " ".join(search_terms[:2]) or query.strip()
+    compact_query = (" ".join(search_terms[:2]) or query.strip())[:255]
     today = datetime.now(UTC).date()
     params = urllib.parse.urlencode({
         "search": compact_query,
@@ -239,10 +259,7 @@ def search_common_vision(
             break
         except urllib.error.HTTPError as error:
             if error.code == 429 and attempt == 0:
-                try:
-                    delay = float(error.headers.get("Retry-After", "5"))
-                except (TypeError, ValueError):
-                    delay = 5.0
+                delay = _common_vision_retry_delay(error)
                 sleep(min(60.0, max(1.0, delay)))
                 continue
             raise RuntimeError(f"common.vision search failed: HTTP {error.code}") from error
@@ -268,16 +285,30 @@ def search_common_vision(
         _parsed, host = validated_url
         if _is_social_validation_host(host):
             continue
+        metadata = item.get("metadata")
         feed = item.get("feed")
-        publisher = feed.get("name") if isinstance(feed, dict) else None
+        publisher = metadata.get("source") if isinstance(metadata, dict) else None
+        feed_name = feed.get("name") if isinstance(feed, dict) else None
         story = {
             "url": url.strip(),
             "title": title.strip(),
-            "publisher": publisher.strip() if isinstance(publisher, str) and publisher.strip() else host,
+            "publisher": (
+                publisher.strip()
+                if isinstance(publisher, str) and publisher.strip()
+                else host
+            ),
         }
         published_at = item.get("published_at")
         if isinstance(published_at, str) and published_at.strip():
             story["published_at"] = published_at.strip()
+        if isinstance(feed_name, str) and feed_name.strip():
+            story["feed_name"] = feed_name.strip()
+        feed_url = feed.get("url") if isinstance(feed, dict) else None
+        if isinstance(feed_url, str) and feed_url.strip():
+            story["feed_url"] = feed_url.strip()
+        feed_type = feed.get("feed_type") if isinstance(feed, dict) else None
+        if isinstance(feed_type, str) and feed_type in {"rss", "atom", "json"}:
+            story["feed_type"] = feed_type
         stories.append(story)
     return stories
 
@@ -443,15 +474,9 @@ def _source(item: Any, claim: ValidationClaim) -> dict[str, str | None] | None:
     _parsed, host = validated_url
     if _is_social_validation_host(host):
         return None
-    explicit_stance = item.get("stance")
-    if explicit_stance is None:
-        stance = _inferred_stance(title, claim)
-        if stance is None:
-            return None
-    else:
-        stance = str(explicit_stance).strip().lower()
-        if stance not in STANCES:
-            return None
+    stance = _inferred_stance(title, claim)
+    if stance is None:
+        return None
     publisher = item.get("publisher", item.get("source"))
     published_at = _normalized_timestamp(item.get("published_at"))
     return {
@@ -460,6 +485,9 @@ def _source(item: Any, claim: ValidationClaim) -> dict[str, str | None] | None:
         "publisher": publisher.strip() if isinstance(publisher, str) else host,
         "stance": stance,
         "published_at": published_at,
+        "feed_name": item.get("feed_name") if isinstance(item.get("feed_name"), str) else None,
+        "feed_url": item.get("feed_url") if isinstance(item.get("feed_url"), str) else None,
+        "feed_type": item.get("feed_type") if item.get("feed_type") in {"rss", "atom", "json"} else None,
     }
 
 
@@ -467,10 +495,14 @@ def _lead_seconds(first_seen_at: str, published_at: str | None) -> int | None:
     if not published_at:
         return None
     try:
-        first = datetime.fromisoformat(first_seen_at.replace("Z", "+00:00")).astimezone(UTC)
-        published = datetime.fromisoformat(published_at.replace("Z", "+00:00")).astimezone(UTC)
+        first = datetime.fromisoformat(first_seen_at.replace("Z", "+00:00"))
+        published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+    if first.tzinfo is None or published.tzinfo is None:
+        return None
+    first = first.astimezone(UTC)
+    published = published.astimezone(UTC)
     return int((published - first).total_seconds())
 
 
@@ -541,6 +573,9 @@ def validate_pending(
                         publisher=source["publisher"],
                         stance=str(source["stance"]),
                         published_at=source["published_at"],
+                        feed_name=source.get("feed_name"),
+                        feed_url=source.get("feed_url"),
+                        feed_type=source.get("feed_type"),
                     )
                 stored = connection.execute(
                     "SELECT stance, published_at FROM event_validations WHERE event_id=?",

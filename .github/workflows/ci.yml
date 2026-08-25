@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run offline test suite
+        run: python -m unittest discover -s tests -v
+
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        run: python -m compileall -q fintick tests
+
+      - name: Check shell syntax
+        run: bash -n setup-fintick-services.sh run-demo.sh
+
+      - name: Check committed whitespace
+        run: git show --check --oneline --no-renames HEAD
+
+      - name: Verify generated user services
+        env:
+          FINTICK_HERMES: /bin/true
+        run: |
+          FINTICK_PYTHON="$(command -v python)" ./setup-fintick-services.sh --dry-run > /tmp/fintick-units.txt
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+
+          output = Path("/tmp/fintick-units.txt").read_text()
+          matches = list(re.finditer(r"^# (fintick-[^\n]+\.service)\n", output, re.MULTILINE))
+          if len(matches) != 4:
+              raise SystemExit(f"expected 4 generated units, found {len(matches)}")
+          with tempfile.TemporaryDirectory() as temporary:
+              paths = []
+              for index, match in enumerate(matches):
+                  end = matches[index + 1].start() if index + 1 < len(matches) else output.index("Dry run only.", match.end())
+                  path = Path(temporary) / match.group(1)
+                  path.write_text(output[match.start():end].strip() + "\n")
+                  paths.append(str(path))
+              subprocess.run(["systemd-analyze", "--user", "verify", *paths], check=True)
+          PY
+
+  gate:
+    name: CI
+    if: ${{ always() }}
+    needs: [tests, quality]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every CI job
+        env:
+          TESTS_RESULT: ${{ needs.tests.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          test "$TESTS_RESULT" = success
+          test "$QUALITY_RESULT" = success

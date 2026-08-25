@@ -192,8 +192,8 @@ def _parse_event(
         instruments=tuple(instruments),
         importance=importance,
         post_uris=tuple(uris),
-        first_seen_at=min(timestamps),
-        last_seen_at=max(timestamps),
+        first_seen_at=min(timestamps, key=_timestamp),
+        last_seen_at=max(timestamps, key=_timestamp),
     )
 
 
@@ -323,7 +323,7 @@ def _load_pending(database: str | Path, limit: int) -> list[dict[str, str]]:
             FROM post_aggregation_decisions d
             JOIN posts p ON p.uri = d.post_uri
             WHERE d.state = 'errored' AND d.attempts < ?
-            ORDER BY p.created_at, p.uri
+            ORDER BY julianday(p.created_at) IS NULL, julianday(p.created_at), p.uri
             LIMIT 1
             """,
             (POST_AGGREGATION_MAX_ATTEMPTS,),
@@ -336,10 +336,9 @@ def _load_pending(database: str | Path, limit: int) -> list[dict[str, str]]:
                 FROM post_aggregation_decisions d
                 JOIN posts p ON p.uri = d.post_uri
                 WHERE d.state = 'errored' AND d.attempts < ? AND d.retry_group = ?
-                ORDER BY p.created_at, p.uri
-                LIMIT ?
+                ORDER BY julianday(p.created_at) IS NULL, julianday(p.created_at), p.uri
                 """,
-                (POST_AGGREGATION_MAX_ATTEMPTS, retry[0], limit),
+                (POST_AGGREGATION_MAX_ATTEMPTS, retry[0]),
             ).fetchall()
         elif retry:
             rows = connection.execute(
@@ -348,7 +347,7 @@ def _load_pending(database: str | Path, limit: int) -> list[dict[str, str]]:
                 FROM post_aggregation_decisions d
                 JOIN posts p ON p.uri = d.post_uri
                 WHERE d.state = 'errored' AND d.attempts < ? AND d.retry_group IS NULL
-                ORDER BY p.created_at, p.uri
+                ORDER BY julianday(p.created_at) IS NULL, julianday(p.created_at), p.uri
                 LIMIT 1
                 """,
                 (POST_AGGREGATION_MAX_ATTEMPTS,),
@@ -360,7 +359,7 @@ def _load_pending(database: str | Path, limit: int) -> list[dict[str, str]]:
                 FROM post_aggregation_decisions d
                 JOIN posts p ON p.uri = d.post_uri
                 WHERE d.state = 'pending'
-                ORDER BY p.created_at, p.uri
+                ORDER BY julianday(p.created_at) IS NULL, julianday(p.created_at), p.uri
                 LIMIT ?
                 """,
                 (limit,),
@@ -376,7 +375,9 @@ def _load_window(database: str | Path, limit: int) -> list[dict[str, str]]:
         raise ValueError(f"limit must be between 1 and {MAX_POSTS}")
     with open_database(database) as connection:
         rows = connection.execute(
-            "SELECT uri, created_at, text FROM posts ORDER BY created_at DESC, uri DESC LIMIT ?",
+            "SELECT uri, created_at, text FROM posts "
+            "ORDER BY julianday(created_at) IS NULL, julianday(created_at) DESC, uri DESC "
+            "LIMIT ?",
             (limit,),
         ).fetchall()
     if not rows:

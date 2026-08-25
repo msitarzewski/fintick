@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
+from fintick.service_handoff import database_identity
 from fintick.storage import load_events, load_pipeline_health, open_database
 
 DEFAULT_LIMIT = 100
@@ -30,6 +31,15 @@ def _safe_validations(value: Any) -> list[dict[str, Any]]:
         parsed = urlsplit(url) if isinstance(url, str) else None
         if not parsed or parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
+        feed_url = item.get("feed_url")
+        parsed_feed = urlsplit(feed_url) if isinstance(feed_url, str) else None
+        safe_feed_url = (
+            feed_url
+            if parsed_feed
+            and parsed_feed.scheme in {"http", "https"}
+            and parsed_feed.netloc
+            else None
+        )
         safe.append({
             "url": url,
             "title": item.get("title") if isinstance(item.get("title"), str) else url,
@@ -40,6 +50,13 @@ def _safe_validations(value: Any) -> list[dict[str, Any]]:
             ),
             "stance": item.get("stance"),
             "published_at": item.get("published_at"),
+            "feed_name": item.get("feed_name") if isinstance(item.get("feed_name"), str) else None,
+            "feed_url": safe_feed_url,
+            "feed_type": (
+                item.get("feed_type")
+                if item.get("feed_type") in {"rss", "atom", "json"}
+                else None
+            ),
         })
     return safe
 
@@ -52,6 +69,7 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
     with open_database(database) as connection:
         events = load_events(connection, limit=None)
         pipeline = load_pipeline_health(connection)
+    pipeline["database_identity"] = database_identity(database)
     for event in events:
         event["validations"] = _safe_validations(event.get("validations"))
     events.sort(key=lambda event: (

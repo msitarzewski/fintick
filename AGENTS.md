@@ -74,8 +74,8 @@ than assuming a particular machine, provider, or service manager.
   in `.gitignore`.
 - Keep the repository runnable at every commit. Run the full tests, compile checks, shell syntax,
   `git diff --check`, security scan, copied-live invariants, and independent review before release.
-- Preserve the README provenance: **"Designed by Claude Opus 4.8 · Built by Qwen 3.8 27B via
-  Hermes."** Preserve the MIT license (Michael Sitarzewski, 2026).
+- Preserve the README provenance: **"Designed by Claude Opus · Built with Qwen 3.8 and GPT 5.6 Sol
+  via Hermes."** Preserve the MIT license (Michael Sitarzewski, 2026).
 
 ## Definition of good
 

@@ -200,6 +200,24 @@ class ParseAggregationTests(unittest.TestCase):
         self.assertEqual(event.first_seen_at, "2026-08-24T15:00:00+00:00")
         self.assertEqual(event.last_seen_at, "2026-08-24T15:03:00+00:00")
 
+    def test_event_span_orders_mixed_offsets_by_utc_instant(self) -> None:
+        earlier = "at://stream/span/earlier"
+        later = "at://stream/span/later"
+        result = parse_aggregation(
+            json.dumps({"events": [_event(
+                stream_post_uris=[later, earlier],
+            )]}),
+            allowed_uris={earlier, later},
+            post_times={
+                earlier: "2026-08-24T14:30:00+00:00",
+                later: "2026-08-24T10:00:00-05:00",
+            },
+        )
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].first_seen_at, "2026-08-24T14:30:00+00:00")
+        self.assertEqual(result.events[0].last_seen_at, "2026-08-24T10:00:00-05:00")
+
     def test_rejects_event_that_reuses_an_already_claimed_post(self) -> None:
         second = _event(
             canonical_headline="A separate claimed event",
@@ -545,6 +563,31 @@ class AggregatePipelineTests(unittest.TestCase):
             ],
         )
 
+    def test_pending_selection_orders_mixed_offsets_by_utc_instant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "mixed-offset-pending.db"
+            with open_database(database) as connection:
+                insert_post(connection, {
+                    "uri": "at://stream/later-local-clock",
+                    "cid": "cid-later-local-clock",
+                    "record": {
+                        "text": "later instant with earlier wall clock",
+                        "createdAt": "2026-08-24T10:00:00-05:00",
+                    },
+                })
+                insert_post(connection, {
+                    "uri": "at://stream/earlier-utc",
+                    "cid": "cid-earlier-utc",
+                    "record": {
+                        "text": "earlier instant",
+                        "createdAt": "2026-08-24T14:30:00+00:00",
+                    },
+                })
+
+            rows = _load_pending(database, 1)
+
+        self.assertEqual([row["uri"] for row in rows], ["at://stream/earlier-utc"])
+
     def test_retryable_errors_are_isolated_from_fresh_pending_posts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "retry.db"
@@ -576,6 +619,37 @@ class AggregatePipelineTests(unittest.TestCase):
         self.assertEqual(
             [row["uri"] for row in rows],
             ["at://stream/retry/0", "at://stream/retry/1"],
+        )
+
+    def test_retry_group_is_not_split_by_fresh_batch_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "retry-group.db"
+            with open_database(database) as connection:
+                for index in range(4):
+                    insert_post(connection, {
+                        "uri": f"at://stream/group/{index}",
+                        "cid": f"cid-group-{index}",
+                        "record": {
+                            "text": f"group post {index}",
+                            "createdAt": f"2026-08-24T15:0{index}:00+00:00",
+                        },
+                    })
+                connection.execute(
+                    "UPDATE post_aggregation_decisions "
+                    "SET state='errored', attempts=1, reason='fixture', "
+                    "retry_group='group-complete'"
+                )
+
+            rows = _load_pending(database, 2)
+
+        self.assertEqual(
+            [row["uri"] for row in rows],
+            [
+                "at://stream/group/0",
+                "at://stream/group/1",
+                "at://stream/group/2",
+                "at://stream/group/3",
+            ],
         )
 
 

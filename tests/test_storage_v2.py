@@ -25,6 +25,7 @@ from fintick.storage import (
     event_key,
     insert_post,
     load_events,
+    load_pipeline_health,
     open_database,
     record_validation,
     set_post_aggregation_decision,
@@ -117,6 +118,23 @@ class FreshDatabaseTests(unittest.TestCase):
                 ).fetchone()
 
         self.assertEqual(decision, ("pending", None, None, 0))
+
+    def test_oldest_pending_health_uses_utc_instant_for_mixed_offsets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mixed-offset-health.db"
+            with open_database(db) as connection:
+                for uri, created_at in (
+                    ("at://stream/later-local-clock", "2026-08-24T10:00:00-05:00"),
+                    ("at://stream/earlier-utc", "2026-08-24T14:30:00+00:00"),
+                ):
+                    insert_post(connection, {
+                        "uri": uri,
+                        "cid": "cid-" + uri.rsplit("/", 1)[-1],
+                        "record": {"text": uri, "createdAt": created_at},
+                    })
+                health = load_pipeline_health(connection)
+
+        self.assertEqual(health["oldest_pending_at"], "2026-08-24T14:30:00+00:00")
 
     def test_existing_posts_are_bootstrapped_into_accounting_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +276,21 @@ class UpsertEventTests(unittest.TestCase):
         self.assertEqual(created_again, False)
         self.assertEqual(rows, 1)
 
+    def test_existing_event_span_merges_mixed_offsets_by_utc_instant(self) -> None:
+        with open_database(self.db) as connection:
+            upsert_event(connection, _make_event(
+                first_seen_at="2026-08-24T10:00:00-05:00",
+                last_seen_at="2026-08-24T10:00:00-05:00",
+            ))
+            upsert_event(connection, _make_event(
+                first_seen_at="2026-08-24T14:30:00+00:00",
+                last_seen_at="2026-08-24T16:00:00+00:00",
+            ))
+            event = load_events(connection)[0]
+
+        self.assertEqual(event["first_seen_at"], "2026-08-24T14:30:00+00:00")
+        self.assertEqual(event["last_seen_at"], "2026-08-24T16:00:00+00:00")
+
     def test_one_event_unifies_signals_and_spans(self) -> None:
         uris = self._all_uris()
         with open_database(self.db) as connection:
@@ -376,6 +409,33 @@ class StatusIsOwnedByValidateTests(unittest.TestCase):
 
 
 class RecordValidationTests(unittest.TestCase):
+    def test_open_database_migrates_legacy_validation_provenance_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "legacy.db"
+            with sqlite3.connect(db) as connection:
+                connection.execute("""
+                    CREATE TABLE event_validations (
+                        event_id INTEGER NOT NULL,
+                        url TEXT NOT NULL,
+                        title TEXT,
+                        publisher TEXT,
+                        stance TEXT NOT NULL DEFAULT 'corroborating',
+                        published_at TEXT,
+                        collected_at TEXT NOT NULL,
+                        PRIMARY KEY (event_id, url)
+                    )
+                """)
+
+            with open_database(db) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(event_validations)"
+                    ).fetchall()
+                }
+
+            self.assertTrue({"feed_name", "feed_url", "feed_type"} <= columns)
+
     def test_first_link_is_new_and_relink_is_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "fintick.db"
@@ -386,6 +446,9 @@ class RecordValidationTests(unittest.TestCase):
                     connection, event_id, url=url,
                     title="Nvidia's brutal 7-day slide", publisher="Reuters",
                     stance="corroborating", published_at=T1,
+                    feed_name="Google News — Business",
+                    feed_url="https://news.google.com/rss/business",
+                    feed_type="rss",
                 )
                 again = record_validation(
                     connection, event_id, url=url,
@@ -402,6 +465,16 @@ class RecordValidationTests(unittest.TestCase):
                 events = load_events(connection)
                 self.assertEqual(len(events[0]["validations"]), 1)
                 self.assertEqual(events[0]["validations"][0]["url"], url)
+                self.assertEqual(events[0]["validations"][0]["publisher"], "Reuters")
+                self.assertEqual(
+                    events[0]["validations"][0]["feed_name"],
+                    "Google News — Business",
+                )
+                self.assertEqual(
+                    events[0]["validations"][0]["feed_url"],
+                    "https://news.google.com/rss/business",
+                )
+                self.assertEqual(events[0]["validations"][0]["feed_type"], "rss")
 
     def test_rehunt_repairs_malformed_legacy_publication_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
