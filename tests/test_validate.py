@@ -259,24 +259,44 @@ class CommonVisionProviderTests(unittest.TestCase):
                 opener=lambda _request, timeout: Response(),
             )
 
-    @mock.patch.dict(os.environ, {"FINTICK_COMMON_VISION_TOKEN": "partner-token"})
+    @mock.patch.dict(os.environ, {"FINTICK_COMMON_VISION_TOKEN": SAMPLE_PARTNER_CREDENTIAL})
     @mock.patch("fintick.validate.search_external_news")
     @mock.patch("fintick.validate.search_common_vision")
-    def test_configured_token_selects_common_vision_without_direct_google_query(
+    def test_configured_token_queries_both_sources_additively(
         self,
         common_search,
         google_search,
     ) -> None:
-        expected = [{"url": "https://example.com/story", "title": "A story"}]
-        common_search.return_value = expected
+        google_search.return_value = [{"url": "https://news.google.com/g", "title": "G"}]
+        common_search.return_value = [{"url": "https://common.vision/c", "title": "C"}]
 
         result = search_validation_news("market claim", 5)
 
-        self.assertEqual(result, expected)
+        # additive: BOTH sources are queried and their candidates combined
+        google_search.assert_called_once_with("market claim", 5)
         common_search.assert_called_once_with(
             "market claim", 5, token=SAMPLE_PARTNER_CREDENTIAL
         )
-        google_search.assert_not_called()
+        self.assertEqual(
+            {row["url"] for row in result},
+            {"https://news.google.com/g", "https://common.vision/c"},
+        )
+
+    @mock.patch.dict(os.environ, {"FINTICK_COMMON_VISION_TOKEN": SAMPLE_PARTNER_CREDENTIAL})
+    @mock.patch("fintick.validate.search_external_news")
+    @mock.patch("fintick.validate.search_common_vision")
+    def test_one_source_failing_still_returns_the_other(
+        self,
+        common_search,
+        google_search,
+    ) -> None:
+        google_search.return_value = [{"url": "https://news.google.com/g", "title": "G"}]
+        common_search.side_effect = RuntimeError("common.vision down")
+
+        result = search_validation_news("market claim", 5)
+
+        # a common.vision failure must not error the whole validation
+        self.assertEqual([row["url"] for row in result], ["https://news.google.com/g"])
 
 
 class ValidatePipelineTests(unittest.TestCase):

@@ -314,11 +314,35 @@ def search_common_vision(
 
 
 def search_validation_news(query: str, limit: int = 5) -> list[dict[str, str]]:
-    """Use the partner index when configured; retain direct RSS for local compatibility."""
+    """Query Google News AND (when configured) the common.vision partner index, ADDITIVELY.
+
+    Both sources contribute candidates, deduped by URL. Each is independently fault-tolerant:
+    if one source is down or rejects the request, the other's results still stand, so a single
+    source failure never errors the whole validation (nor does it silence the other source).
+    """
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _merge(items: list[dict[str, str]]) -> None:
+        for item in items:
+            url = item.get("url") or ""
+            if url and url not in seen:
+                seen.add(url)
+                results.append(item)
+
+    # Google News is always queried.
+    try:
+        _merge(search_external_news(query, limit))
+    except Exception:
+        pass
+    # common.vision is added on top when a partner token is configured.
     token = os.environ.get("FINTICK_COMMON_VISION_TOKEN", "").strip()
     if token:
-        return search_common_vision(query, limit, token=token)
-    return search_external_news(query, limit)
+        try:
+            _merge(search_common_vision(query, limit, token=token))
+        except Exception:
+            pass
+    return results[: max(2 * limit, limit)]
 
 
 def _json_list(value: str) -> list[Any]:
