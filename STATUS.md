@@ -1,10 +1,19 @@
+DONE
+
 # FinTick — Build Status (v2: stream-signal + validation)
+
+FinTick v2 is complete: one stream becomes distinct events; each event carries structured facts and
+stream-signal counts; independent RSS/news validation produces breaking/confirmed/contradicted/developing
+status with lead time; and the responsive Edge Board makes uncorroborated events visually primary. The
+canonical four-post NVDA fixture reaches one breaking event with four signals, facts, unified NVDA, and
+zero external sources. All 69 tests pass; all four worker processes were launched and verified; desktop
+and mobile interfaces were rendered and inspected; the dashboard runs at http://127.0.0.1:8137.
 
 <!-- When ALL PRD.md §7 acceptance criteria pass, replace the line below with `DONE` + a
      one-paragraph summary, then run: hermes cron pause fintick-build -->
-STATUS: IN PROGRESS
+STATUS: DONE
 
-**Current milestone:** M6 — final acceptance and process wiring (M5 dashboard done 2026-08-25).
+**Current milestone:** Complete — M1 through M6 accepted 2026-08-25.
 
 ## The v2 pivot (read this first every fire)
 v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
@@ -61,8 +70,13 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       stream-origin language, safe external links, and news lag; refreshes every 20s; defaults to 8137.
       Desktop (1077px) and mobile (390px) renders were inspected live; a mobile heading/timestamp
       collision found during inspection was fixed and re-verified. 67/67 tests green.
-- [ ] **M6 — Acceptance.** Walk PRD §7 1–7; NVDA fixture end-to-end → one `breaking` event with
+- [x] **M6 — Acceptance.** Walk PRD §7 1–7; NVDA fixture end-to-end → one `breaking` event with
       facts; update README for v2; `setup-fintick-supervisor.sh` correct (non-8080 port).
+      ✅ 2026-08-25: `tests/test_acceptance_v2.py` verifies the complete offline fixture path and
+      operational docs. README/run-demo describe v2; Supervisor launches ingest/aggregate/validate/
+      dashboard on 8137. All four watch processes completed initial cycles and stayed alive; SIGTERM
+      shutdown was clean for workers. Full suite: 69/69. Repository excludes runtime DBs/logs/caches;
+      autonomous `fintick-build` cron was already paused.
 
 ## Build config (now enforced at the Hermes level)
 - **Local Qwen ONLY** — cloud `fallback_providers` is disabled; **do not** expect or rely on a

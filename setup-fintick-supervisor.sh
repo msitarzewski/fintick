@@ -50,16 +50,16 @@ environment=PYTHONUNBUFFERED="1",HOME="/home/${RUN_USER}"
 EOF
 }
 
-# Watch mode processes one expensive item per cycle. Five minutes exceeds each
-# worker's complete worst-case configured I/O budget, including SQLite waits.
+# Aggregation makes one bounded local-model call per 15-minute cycle. Validation
+# rechecks unconfirmed events every five minutes, with per-event caching.
 write_program fintick-ingest "${PYTHON} -m fintick ingest --database ${DATA_DIR}/fintick.db --watch --interval 900" 5 300
-write_program fintick-enrich "${PYTHON} -m fintick enrich --database ${DATA_DIR}/fintick.db --watch --interval 15" 5 300
-write_program fintick-research "${PYTHON} -m fintick research --database ${DATA_DIR}/fintick.db --watch --interval 300" 5 300
-write_program fintick-dashboard "${PYTHON} -m fintick serve --database ${DATA_DIR}/fintick.db --host 127.0.0.1 --port 8080" 5 15
+write_program fintick-aggregate "${PYTHON} -m fintick aggregate --database ${DATA_DIR}/fintick.db --watch --interval 900" 5 360
+write_program fintick-validate "${PYTHON} -m fintick validate --database ${DATA_DIR}/fintick.db --watch --interval 300 --min-age 900" 5 90
+write_program fintick-dashboard "${PYTHON} -m fintick serve --database ${DATA_DIR}/fintick.db --host 127.0.0.1 --port 8137" 5 15
 
 chown root:root "${CONF_DIR}"/fintick-*.conf
 chmod 0644 "${CONF_DIR}"/fintick-*.conf
 
 echo "Installed four FinTick Supervisor programs in ${CONF_DIR}."
 echo "Run: sudo supervisorctl reread && sudo supervisorctl update"
-echo "Then open: http://127.0.0.1:8080"
+echo "Then open: http://127.0.0.1:8137"

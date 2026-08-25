@@ -2,111 +2,125 @@
 
 > **Designed by Claude Opus 4.8 · Built by Qwen 3.8 27B via Hermes.**
 
-FinTick is a local-first, always-on financial news tape. It captures the
-high-signal `fintwitter.bsky.social` firehose, collapses repeated headlines,
-enriches each event with a local Qwen model, and serves the result as a dark,
-glanceable market dashboard.
+FinTick watches one unusually fast financial stream and measures the gap between **the stream said it** and **the news confirms it**.
 
-No cloud AI. No paid market-data API. No triplicate headlines.
+It merges repeated stream posts into one event, extracts the concrete claims with a local model, hunts independent news for corroboration, and makes the valuable state obvious:
 
-```text
-┌─ FINTICK // LIVE ───────────────────────────────────────────────────────┐
-│ ▼ BZ  BRENT SETTLES $92.17, DOWN 2.35%  ◆  NG $2.782/MMBTU  ◆  ... → │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+> 🔴 **BREAKING — no corroboration yet** means the stream may be ahead of the wire. It is a result, not an error.
 
-## Status
+No cloud AI. No paid market-data API. No pretending four repeated posts are four sources.
 
-FinTick's end-to-end pipeline is operational: durable Bluesky ingest, auditable
-deduplication, local-model enrichment, bounded related-story research, and the
-live dashboard. `STATUS.md` tracks the final acceptance pass.
+## The Edge Board
+
+The web interface is an auto-refreshing event board—not a raw-post reader:
+
+- Validation state is the visual focal point.
+- Breaking, uncorroborated events sort first.
+- Stream repetition is shown as `via the stream · seen N×`.
+- “Sources” means only independent external stories with URLs.
+- Confirmed events show how long the news lagged the stream.
+
+Open **<http://127.0.0.1:8137>** after starting the dashboard.
 
 ## Quick start
 
-FinTick intentionally depends only on the Python standard library at runtime.
-Python 3.11 or newer is required (development is exercised on Python 3.14).
+FinTick is standard-library Python and requires Python 3.11 or newer. The local inference endpoint is Ollama-compatible at `http://localhost:11434`, with model `qwen3.8:27b`.
 
 ```bash
 python3 -m fintick doctor
-python3 -m unittest discover -v
+python3 -m unittest discover -s tests -v
 ```
 
-The offline fixture at `reference/feed_sample.json` is the first proving ground.
-Live Bluesky access is used only after the offline ingest and dedup pipeline
-passes.
-
-## Run it
+### One-command fixture demo
 
 ```bash
-# Offline proving run (never contacts Bluesky)
-python3 -m fintick ingest --fixture reference/feed_sample.json
+./run-demo.sh
+```
 
-# Start the continuous workers (separate terminals)
-python3 -m fintick ingest --watch
-python3 -m fintick enrich --watch
-python3 -m fintick research --watch
+This ingests the canonical four-post NVDA cluster, aggregates it with local Qwen, and starts the Edge Board on port 8137.
+
+### Run the v2 pipeline manually
+
+```bash
+# One-shot proving run
+python3 -m fintick ingest --fixture reference/nvda_repost_cluster.json
+python3 -m fintick aggregate
+python3 -m fintick validate
 python3 -m fintick serve
+
+# Continuous workers—run each in a separate terminal
+python3 -m fintick ingest --watch
+python3 -m fintick aggregate --watch
+python3 -m fintick validate --watch
+python3 -m fintick serve --port 8137
 ```
 
-Open <http://127.0.0.1:8080>. The worker intervals are configurable with
-`--interval`; ingest defaults to 15 minutes. Each worker runs an immediate cycle,
-logs counts to stdout, survives transient cycle failures, and exits cleanly on
-SIGTERM/SIGINT. Continuous enrichment and research deliberately process one item
-per cycle so shutdown never sits behind a claimed batch; one-shot commands still
-honor `--limit` for bulk work.
+The default worker cadence is:
 
-For unattended operation across reboots, install the four Supervisor programs:
-
-```bash
-sudo ./setup-fintick-supervisor.sh
-sudo supervisorctl reread && sudo supervisorctl update
-```
-
-The production database lives at `data/fintick.db`. Runtime data, logs, caches,
-and secrets are ignored by git. FinTick itself runs as the unprivileged `michael`
-user; the installer needs root only to write Supervisor configuration.
+- ingest every 15 minutes,
+- aggregate one rolling six-hour window every 15 minutes,
+- validate/revalidate unconfirmed events every 5 minutes,
+- refresh the browser every 20 seconds.
 
 ## Architecture
 
 ```text
-Bluesky public AppView
-        │
-        ▼
- ingest + exact normalized dedup ───────► SQLite (`data/fintick.db`)
-                                               │
-                          ┌────────────────────┼──────────────────┐
-                          ▼                    ▼                  ▼
-                   local Qwen enrich     bounded research    JSON + web UI
-                   localhost:11434       related context     live tape
+fintwitter.bsky.social (one stream; the signal)
+                       │
+                       ▼
+              durable URI ingest
+                       │
+                       ▼
+          rolling 6h aggregate + facts
+             one local Qwen call
+                       │
+                       ▼
+          events ←→ event_signals
+                       │
+                       ▼
+       independent RSS/news validation
+                       │
+          ┌────────────┼──────────────┐
+          ▼            ▼              ▼
+      BREAKING      CONFIRMED      DISPUTED /
+    no sources yet  external URLs   DEVELOPING
+          └────────────┴──────────────┘
+                       │
+                       ▼
+           JSON API + Edge Board :8137
 ```
 
-The boundaries are deliberately simple:
+The SQLite database lives at `data/fintick.db`:
 
-- **Ingest:** paginates to previously seen posts and inserts by immutable URI.
-- **Dedup:** keeps every row for audit, but marks one canonical event for the tape.
-- **Enrich:** processes one canonical headline at a time through local structured
-  inference; malformed model output is isolated and retryable.
-- **Research:** attaches cached context only to consequential stories.
-- **Dashboard:** serves raw headlines immediately, then fills in intelligence as
-  workers complete it.
+- `posts` retains every stream post by immutable URI.
+- `events` stores the canonical event, facts, instruments, status, and lead time.
+- `event_signals` maps repeated stream posts to their one event.
+- `event_validations` stores external stories. These—and only these—are sources.
 
-## Why this collaboration is unusual
+Aggregation is idempotent on a deterministic event key and never overwrites validation state. Validation is re-runnable, so an event can begin `breaking` and flip to `confirmed` when the wire catches up.
 
-Claude Opus 4.8 designed the product and acceptance contract. Qwen 3.8 27B,
-running locally through Hermes, is building it milestone by milestone. Michael
-sets the taste and the operational constraints. The result is meant to be less
-of an AI demo and more of a small, legible system worth leaving on all day.
+## Unattended operation
 
-## Development rules
+The installer writes four Supervisor programs—ingest, aggregate, validate, and dashboard—and runs FinTick as the unprivileged `michael` user:
 
-- Build and test against the captured fixture before touching the live API.
-- Prefer Python's standard library and readable components.
-- Keep ingest idempotent and retain duplicate rows for audit.
-- Never commit the database, logs, caches, credentials, or secrets.
-- Do not enrich duplicate headlines.
+```bash
+sudo ./setup-fintick-supervisor.sh
+sudo supervisorctl reread
+sudo supervisorctl update
+```
 
-See `PRD.md` for the product contract, `AGENTS.md` for build rules, and
-`STATUS.md` for milestone progress.
+The dashboard binds to loopback on port 8137. Runtime databases, logs, caches, and secrets are excluded by `.gitignore`.
+
+## Product contract
+
+- `PRD.md` defines the product and acceptance criteria.
+- `STATUS.md` records verified milestone state.
+- `reference/nvda_repost_cluster.json` is the canonical v2 acceptance fixture.
+- `AGENTS.md` describes the local-first build constraints.
+
+## The collaboration
+
+Claude Opus 4.8 designed the product and acceptance contract. Qwen 3.8 27B, running locally through Hermes, built it milestone by milestone. Michael set the taste, reframed the stream as signal rather than “sources,” and kept the work honest: runnable systems over AI theater.
 
 ## License
 
