@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval", type=float, default=900, help="watch interval in seconds (default: 900)"
     )
     enrich = subparsers.add_parser(
-        "enrich", help="enrich pending canonical posts with local Qwen"
+        "enrich", help="RETAINED v1-baseline only (v2 replaces enrich with aggregate): enrich pending canonical posts with local Qwen"
     )
     enrich.add_argument(
         "--database", default="data/fintick.db", help="SQLite database path"
@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval", type=float, default=15, help="watch interval in seconds (default: 15)"
     )
     research = subparsers.add_parser(
-        "research", help="find related stories for important enriched posts"
+        "research", help="RETAINED v1-baseline only (v2 replaces research with validate): find related stories for important enriched posts"
     )
     research.add_argument(
         "--database", default="data/fintick.db", help="SQLite database path"

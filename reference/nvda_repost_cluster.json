@@ -1,0 +1,90 @@
+{
+  "_comment": "FinTick v2 canonical fixture: four real stream posts of ONE event (NVDA 7th down day), captured from the live tape. Tests (1) that aggregation MERGES them into a single event, and (2) that with no live news reachable offline, the validation hunt yields 0 external sources -> status 'breaking'. The four posts are the SIGNAL from one stream, never 'four sources'.",
+  "feed": [
+    {
+      "post": {
+        "uri": "at://did:plc:43fdk46qa5gsokzygzildsaq/app.bsky.feed.post/3nvda7thday01",
+        "cid": "bafyreianvda7thday00000000000000000000000000000000000001",
+        "author": {
+          "did": "did:plc:43fdk46qa5gsokzygzildsaq",
+          "handle": "fintwitter.bsky.social",
+          "displayName": "FinTwitter"
+        },
+        "record": {
+          "$type": "app.bsky.feed.post",
+          "createdAt": "2026-08-24T15:00:11.000000+00:00",
+          "langs": ["en"],
+          "text": "NVIDIA FELL FOR A 7TH DAY, ITS LONGEST LOSING STREAK SINCE 2022"
+        },
+        "indexedAt": "2026-08-24T15:00:12.000Z",
+        "likeCount": 3,
+        "repostCount": 1,
+        "replyCount": 0
+      }
+    },
+    {
+      "post": {
+        "uri": "at://did:plc:43fdk46qa5gsokzygzildsaq/app.bsky.feed.post/3nvda7thday02",
+        "cid": "bafyreianvda7thday00000000000000000000000000000000000002",
+        "author": {
+          "did": "did:plc:43fdk46qa5gsokzygzildsaq",
+          "handle": "fintwitter.bsky.social",
+          "displayName": "FinTwitter"
+        },
+        "record": {
+          "$type": "app.bsky.feed.post",
+          "createdAt": "2026-08-24T15:02:40.000000+00:00",
+          "langs": ["en"],
+          "text": "$NVDA - *NVIDIA FALLS FOR 7TH DAY, LONGEST LOSING STREAK SINCE 2022"
+        },
+        "indexedAt": "2026-08-24T15:02:41.000Z",
+        "likeCount": 5,
+        "repostCount": 2,
+        "replyCount": 1
+      }
+    },
+    {
+      "post": {
+        "uri": "at://did:plc:43fdk46qa5gsokzygzildsaq/app.bsky.feed.post/3nvda7thday03",
+        "cid": "bafyreianvda7thday00000000000000000000000000000000000003",
+        "author": {
+          "did": "did:plc:43fdk46qa5gsokzygzildsaq",
+          "handle": "fintwitter.bsky.social",
+          "displayName": "FinTwitter"
+        },
+        "record": {
+          "$type": "app.bsky.feed.post",
+          "createdAt": "2026-08-24T15:05:03.000000+00:00",
+          "langs": ["en"],
+          "text": "Nvidia falls for the 7th day, longest losing streak since 2022 $NVDA"
+        },
+        "indexedAt": "2026-08-24T15:05:04.000Z",
+        "likeCount": 2,
+        "repostCount": 0,
+        "replyCount": 0
+      }
+    },
+    {
+      "post": {
+        "uri": "at://did:plc:43fdk46qa5gsokzygzildsaq/app.bsky.feed.post/3nvda7thday04",
+        "cid": "bafyreianvda7thday00000000000000000000000000000000000004",
+        "author": {
+          "did": "did:plc:43fdk46qa5gsokzygzildsaq",
+          "handle": "fintwitter.bsky.social",
+          "displayName": "FinTwitter"
+        },
+        "record": {
+          "$type": "app.bsky.feed.post",
+          "createdAt": "2026-08-24T15:08:22.000000+00:00",
+          "langs": ["en"],
+          "text": "$NVDA - NVIDIA DIPS IN VOLUME SPIKE, LAST OFF 3.2%"
+        },
+        "indexedAt": "2026-08-24T15:08:23.000Z",
+        "likeCount": 4,
+        "repostCount": 1,
+        "replyCount": 0
+      }
+    }
+  ],
+  "cursor": "2026-08-24T15:08:22.000000+00:00"
+}

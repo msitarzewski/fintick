@@ -1,83 +1,59 @@
-# FinTick — Build Status
+# FinTick — Build Status (v2: stream-signal + validation)
 
-<!-- When the build is fully complete and all PRD §7 acceptance criteria pass,
-     replace the line below with `DONE` followed by a one-paragraph summary,
-     then run: hermes cron pause fintick-build -->
+<!-- When ALL PRD.md §7 acceptance criteria pass, replace the line below with `DONE` + a
+     one-paragraph summary, then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M8 — final acceptance pass and README/dashboard polish.
+**Current milestone:** M2 — Aggregate (M1 schema done 2026-08-25).
+
+## The v2 pivot (read this first every fire)
+v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
+(`git stash list` → "abandoned-m8-wip"). **Do NOT resume v1.** v2 **keeps v1's ingest + storage**
+and **replaces the middle**: the old `dedup → enrich → research` becomes
+**`aggregate → facts → validate`** (see PRD.md, rewritten). The core idea: the feed is **one
+stream** (the signal, never "sources"); merge its repeats into one event; hunt **external** news to
+validate; and an event with **0 external sources = `breaking`**, which is the point, not a failure.
+
+Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA posts must become
+**one** event, and offline must land as **`breaking`** (0 external sources).
+
+> ⚠️ **Supersedes AGENTS.md:** the v1 hard-rule "Dedup is mandatory" is **retired** for v2 — do NOT
+> hash-dedup. Aggregation (F2) is the merge mechanism. Ignore `reference/dedup_insight.md`.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
+- [x] **M1 — Schema.** Add `events`, `event_signals` (event↔stream post), `event_validations`
+      (event↔external source w/ URL) tables + migration. Keep the existing `posts` table + ingest
+      untouched. Retire/neutralize the v1 `dedup`/`enrich`/`research` modules (don't delete blindly —
+      leave the tree runnable). ✅ 2026-08-25: V2_SCHEMA additive (no ALTER/backfill); `upsert_event`
+      idempotent on headline-hash key, never touches status; `record_validation` upserts (event,url);
+      `set_event_status` owns status/lead_seconds; `load_events` joins stream_seen + validations.
+      CLI help for retired v1 middle marked "RETAINED v1-baseline only". 59/59 tests green
+      (47 legacy + 12 v2, `tests/test_storage_v2.py`). Verified: fresh DB has all 6 tables; v1-baseline
+      DB gains exactly the 3 new tables on next open, idempotent; `ingest --fixture` round-trips 60 posts.
+- [ ] **M2 — Aggregate.** Rolling-6h-window batch → **one** local-Qwen call → distinct events +
+      `stream_post_uris` mapping, schema-validated, resilient to bad JSON.
+      **Acceptance: the NVDA fixture → 1 event, 4 signals, instruments unify `$NVDA`/`NVIDIA`.**
+- [ ] **M3 — Facts.** Structured claim extraction per event (down-day count, % move, etc.), local model.
+- [ ] **M4 — Validate (core).** External news hunt via `curl` (RSS/news JSON, NO browser) →
+      `validating_sources` + `status` (breaking / confirmed / contradicted / developing) + lead time.
+      Re-runnable so `breaking` can flip to `confirmed`. **Fixture offline → `breaking`, 0 sources.**
+- [ ] **M5 — Dashboard.** Event cards with the **validation badge front-and-center**; breaking events
+      highlighted + sorted up; origin as "via the stream · seen N×" (NEVER "N sources"); lead time on
+      confirmed. **Fix the v1 doubled-headline render bug** (title+text were concatenated).
+      Dashboard port must be **non-8080** (e.g. 8137), configurable.
+- [ ] **M6 — Acceptance.** Walk PRD §7 1–7; NVDA fixture end-to-end → one `breaking` event with
+      facts; update README for v2; `setup-fintick-supervisor.sh` correct (non-8080 port).
 
-- [x] **M1 — Repo skeleton.** git init (branch main), README (with provenance line), LICENSE (MIT),
-      .gitignore (data/, *.db, logs/, caches, __pycache__). Directory layout decided.
-- [x] **M2 — Ingest + storage.** Fetch author feed (offline via reference/feed_sample.json first),
-      SQLite schema, store raw posts idempotently (uri = PK). Pagination-to-last-seen.
-- [x] **M3 — Dedup.** Normalize + hash + windowed collapse of ALLCAPS/Title-Case reposts;
-      canonical vs duplicate rows. Verify it collapses the known dupes in the fixture.
-- [x] **M4 — Enrich (local Qwen).** Structured tagging via localhost:11434: summary, category,
-      importance, sentiment, instruments (global symbols), entities, regions. Resilient to bad output.
-- [x] **M5 — Research.** Web lookup of related stories for importance ≥ 3 items; attach links; cache.
-- [x] **M6 — Dashboard.** Auto-refreshing tape + enriched cards; dark terminal aesthetic; symbol chips.
-- [x] **M7 — Run-as-process.** Long-lived processes; self-test with setsid/nohup; write
-      setup-fintick-supervisor.sh for Michael. Live smoke test against the real API.
-- [ ] **M8 — Acceptance pass.** Walk PRD §7 items 1–7; confirm each; polish README with a real
-      screenshot/ASCII of the running tape.
+## Build config (now enforced at the Hermes level)
+- **Local Qwen ONLY** — cloud `fallback_providers` is disabled; **do not** expect or rely on a
+  fallback. If the local model errors, mark the item errored and continue.
+- Streaming is on, so long aggregation turns won't be killed by the old non-stream timeout.
+- Everything else per AGENTS.md: offline-fixture-first, commit per milestone, no sudo (write the
+  supervisor script), no `git push`, DONE + pause when §7 all pass.
 
 ## Notes / decisions
-- 2026-08-24 / M1: Standard-library Python package with `unittest`; keep one CLI with
-  separate ingest/enrich/research/serve subcommands as those processes land. SQLite runtime state
-  will live in ignored `data/fintick.db`. Baseline verified on Python 3.14 with compileall, one CLI
-  test, and `python3 -m fintick doctor`.
-- Offline fixture shape verified: 60 newest-first author-feed entries plus an opaque cursor; each
-  entry wraps `post`, with source text/timestamp under `post.record`.
-- 2026-08-24 / M2: Added a WAL-mode SQLite store keyed by post URI, retained compact raw JSON and
-  source metadata, and persisted newest URI/timestamp high-water marks. The stdlib AppView client
-  builds unauthenticated `posts_no_replies` requests and the paginator stops at an entirely known
-  page or an eight-page cap. Offline CLI verification inserted 60 posts on the first run and 0 on
-  the second; six unit tests pass, including multi-page traversal and high-water correctness.
-- 2026-08-24 / M3: Added lowercase/whitespace/trailing-punctuation normalization, stable SHA-1
-  hashes, and deterministic 60-minute clustering anchored on the earliest chronological post.
-  Duplicates remain auditable and link directly to canonical rows; existing M2 databases migrate
-  and backfill transactionally. Offline fixture verification yields exactly 60 stored / 55
-  canonical / 5 duplicate rows and is idempotent on rerun. Sixteen tests pass, including reverse
-  insertion order, overlapping-window non-chaining, timezone-offset ordering, exact boundary,
-  malformed legacy data, migration, and canonical-link invariants. Independent review passed.
-- 2026-08-24 / M4: Added one-headline-per-call enrichment through Ollama's native forced-JSON
-  endpoint, with strict validation for summary/category/importance/sentiment/instruments/entities/
-  regions, thinking-wrapper cleanup, per-item error isolation, and a three-attempt cap. Canonical
-  work is atomically leased with fenced UUID tokens, so concurrent or stale workers cannot corrupt
-  completed results; abandoned leases become retryable after 15 minutes. Offline stubs cover bad
-  JSON, missing structure, retries, canonical-only selection, concurrency, and stale-worker races.
-  A real local `qwen3.8:27b` smoke test produced a complete NVDA enrichment from the fixture.
-  Twenty-six tests pass; repeated concurrency checks and independent pre-commit review passed.
-- 2026-08-24 / M5: Added bounded Google News RSS research for complete canonical enrichments at
-  importance ≥3, with focused queries derived from local summaries/entities, strict 1–2-link
-  validation, URL deduplication, durable per-URI caching, retry caps, fenced 15-minute leases, and
-  per-item failure isolation. HTTP 429 responses honor numeric Retry-After with a bounded delay and
-  one polite retry. Offline fixture/stub coverage proves eligibility, caching, malformed-data
-  resilience, failure isolation, RSS parsing, and rate-limit behavior. A one-request live smoke test
-  attached two genuinely related NVIDIA/SpaceX stories to the M4 sample. Thirty-three tests and
-  compileall pass; independent pre-commit review passed after its three blocking findings were fixed.
-- 2026-08-24 / M6: Added a dependency-free threaded HTTP dashboard with a self-contained dark
-  terminal UI, continuously scrolling canonical-headline tape, responsive signal cards, category
-  colors, importance marks, sentiment and direction-aware symbol chips, researched links, and a
-  20-second JSON refresh loop. Raw posts render immediately while analysis is pending; malformed
-  enrichment/research data degrades safely. The server initializes SQLite once before accepting
-  concurrent requests, orders offset timestamps by actual instant, and exposes only validated
-  HTTP(S) related links. Offline runtime verification served the 60-post fixture as 55 canonical
-  signals; 43 tests and compileall pass, including 40 concurrent HTTP reads. Independent review
-  passed after its two blocking findings were fixed.
-- 2026-08-24 / M7: Added resilient `--watch` modes for ingest, enrich, and research with immediate
-  cycles, configurable intervals, UTC count logs, transient-failure isolation, and clean
-  SIGTERM/SIGINT shutdown. Added an author-style root installer for four unprivileged Supervisor
-  programs with restart policy and rotating logs. All four processes were launched under the
-  current user against the offline fixture; they stayed up, served enriched tape data over HTTP,
-  and shut down correctly. A polite two-run live AppView smoke stored 200 unique URI rows on the
-  first pass (189 canonical / 11 duplicate) and inserted zero on the second. Forty-seven tests,
-  compileall, shell syntax validation, and final independent review pass. Review-driven hardening
-  moved Supervisor logs to root-owned `/var/log/fintick`, bounded watch cycles to one expensive
-  item, and set stop windows above complete configured I/O budgets.
+- 2026-08-24: pivoted v1 → v2. Kept ingest + storage; replaced dedup/enrich/research with
+  aggregate/facts/validate. Reframed "sources" = external validation only; stream = one origin.
 
 ## Blockers
 (none)
