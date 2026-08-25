@@ -55,6 +55,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("aggregate selected=4 events=1 new=1 errored=0", output.getvalue())
 
     @mock.patch(
+        "fintick.cli.aggregate_once",
+        return_value=AggregateStats(selected=10, events=5, created=5, errored=0),
+    )
+    def test_aggregate_defaults_to_operational_batch_of_ten(
+        self, aggregate_once: mock.Mock
+    ) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = main(["aggregate", "--database", "/tmp/events.db"])
+
+        self.assertEqual(result, 0)
+        aggregate_once.assert_called_once_with("/tmp/events.db", limit=10)
+
+    @mock.patch(
         "fintick.cli.validate_pending",
         return_value=ValidateStats(selected=2, breaking=1, confirmed=1),
     )

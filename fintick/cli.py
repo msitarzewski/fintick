@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from fintick import __version__
-from fintick.aggregate import MAX_POSTS, aggregate_once
+from fintick.aggregate import DEFAULT_BATCH, MAX_POSTS, aggregate_once
 from fintick.dashboard import serve_dashboard
 from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
@@ -57,8 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--database", default="data/fintick.db", help="SQLite database path"
     )
     aggregate.add_argument(
-        "--limit", type=int, default=MAX_POSTS, choices=range(1, MAX_POSTS + 1),
-        help=f"maximum posts in the six-hour window (default: {MAX_POSTS})",
+        "--limit", type=int, default=DEFAULT_BATCH, choices=range(1, MAX_POSTS + 1),
+        help=f"maximum posts in the six-hour window (default: {DEFAULT_BATCH}; cap: {MAX_POSTS})",
     )
     aggregate.add_argument("--watch", action="store_true", help="aggregate continuously")
     aggregate.add_argument(

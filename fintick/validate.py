@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import urllib.error
@@ -20,6 +21,17 @@ from fintick.storage import open_database, record_validation, set_event_status
 
 NEWS_RSS_ENDPOINT = "https://news.google.com/rss/search"
 STANCES = {"corroborating", "disputing", "partial"}
+NUMBER_WORDS = {
+    "one": "1", "first": "1", "two": "2", "second": "2", "three": "3", "third": "3",
+    "four": "4", "fourth": "4", "five": "5", "fifth": "5", "six": "6", "sixth": "6",
+    "seven": "7", "seventh": "7", "eight": "8", "eighth": "8", "nine": "9", "ninth": "9",
+    "ten": "10", "tenth": "10",
+}
+STOP_WORDS = {
+    "a", "an", "and", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it",
+    "its", "of", "on", "or", "the", "to", "with", "since",
+}
+DISPUTE_WORDS = {"deny", "denies", "denied", "dispute", "disputes", "false", "incorrect", "not"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +44,19 @@ class ValidateStats:
     errored: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ValidationClaim:
+    event_id: int
+    query: str
+    first_seen_at: str
+    previous_status: str
+    headline: str
+    facts_json: str
+    instruments_json: str
+
+
 def parse_validation_rss(payload: bytes, *, limit: int = 5) -> list[dict[str, str]]:
-    """Parse bounded Google News RSS results as candidate corroborating stories."""
+    """Parse bounded Google News RSS results as unclassified candidate stories."""
     try:
         root = ET.fromstring(payload)
     except ET.ParseError as error:
@@ -60,7 +83,6 @@ def parse_validation_rss(payload: bytes, *, limit: int = 5) -> list[dict[str, st
             "url": url,
             "title": title,
             "publisher": publisher or parsed.netloc.removeprefix("www."),
-            "stance": "corroborating",
         }
         if published_at:
             story["published_at"] = published_at
@@ -129,7 +151,7 @@ def _query(headline: str, summary: str | None, facts_json: str, instruments_json
 
 def _claim_events(
     database: str | Path, *, limit: int, min_age: float
-) -> list[tuple[int, str, str, str]]:
+) -> list[ValidationClaim]:
     if limit < 1 or min_age < 0:
         raise ValueError("limit must be positive and min_age non-negative")
     with open_database(database):
@@ -156,7 +178,15 @@ def _claim_events(
         )
         connection.commit()
         return [
-            (row[0], _query(row[1], row[2], row[3], row[4]), row[5], row[6])
+            ValidationClaim(
+                event_id=row[0],
+                query=_query(row[1], row[2], row[3], row[4]),
+                first_seen_at=row[5],
+                previous_status=row[6],
+                headline=row[1],
+                facts_json=row[3],
+                instruments_json=row[4],
+            )
             for row in rows
         ]
     except BaseException:
@@ -166,7 +196,77 @@ def _claim_events(
         connection.close()
 
 
-def _source(item: Any) -> dict[str, str | None] | None:
+def _stem(token: str) -> str:
+    token = NUMBER_WORDS.get(token, token)
+    ordinal = re.fullmatch(r"(\d+)(?:st|nd|rd|th)", token)
+    if ordinal:
+        token = ordinal.group(1)
+    if not token.isalpha() or len(token) <= 4:
+        return token
+    if token.endswith("ies"):
+        return token[:-3] + "y"
+    if token.endswith("ing") and len(token) > 6:
+        return token[:-3]
+    if token.endswith("ed") and len(token) > 5:
+        return token[:-2]
+    if token.endswith("es") and len(token) > 5:
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        _stem(token)
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if token not in STOP_WORDS
+    }
+
+
+def _inferred_stance(title: str, claim: ValidationClaim) -> str | None:
+    """Classify a search candidate conservatively from title-level evidence."""
+    title_tokens = _tokens(title)
+    instruments = [item for item in _json_list(claim.instruments_json) if isinstance(item, dict)]
+    entity_text = " ".join(
+        str(item.get(field, "")) for item in instruments for field in ("symbol", "name")
+    )
+    entity_tokens = _tokens(entity_text)
+    if entity_tokens and not title_tokens.intersection(entity_tokens):
+        return None
+
+    facts = [item for item in _json_list(claim.facts_json) if isinstance(item, dict)]
+    fact_labels = " ".join(
+        f"{item.get('label', '')} {item.get('unit', '')}" for item in facts
+    )
+    fact_values = " ".join(str(item.get("value", "")) for item in facts)
+    value_tokens = _tokens(fact_values)
+    context_tokens = _tokens(f"{claim.headline} {fact_labels}") - entity_tokens - value_tokens
+    context_matches = title_tokens.intersection(context_tokens)
+    value_matches = title_tokens.intersection(value_tokens)
+    dispute = bool(title_tokens.intersection({_stem(word) for word in DISPUTE_WORDS}))
+    if dispute and value_matches and context_matches:
+        return "disputing"
+    if value_matches and len(context_matches) >= 2:
+        return "corroborating"
+    if len(context_matches) >= 2:
+        return "partial"
+    return None
+
+
+def _normalized_timestamp(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _source(item: Any, claim: ValidationClaim) -> dict[str, str | None] | None:
     if not isinstance(item, dict):
         return None
     url, title = item.get("url"), item.get("title")
@@ -175,17 +275,23 @@ def _source(item: Any) -> dict[str, str | None] | None:
     parsed = urllib.parse.urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not title.strip():
         return None
-    stance = str(item.get("stance", "corroborating")).strip().lower()
-    if stance not in STANCES:
-        return None
+    explicit_stance = item.get("stance")
+    if explicit_stance is None:
+        stance = _inferred_stance(title, claim)
+        if stance is None:
+            return None
+    else:
+        stance = str(explicit_stance).strip().lower()
+        if stance not in STANCES:
+            return None
     publisher = item.get("publisher", item.get("source"))
-    published_at = item.get("published_at")
+    published_at = _normalized_timestamp(item.get("published_at"))
     return {
         "url": url.strip(),
         "title": title.strip(),
         "publisher": publisher.strip() if isinstance(publisher, str) else parsed.netloc,
         "stance": stance,
-        "published_at": published_at.strip() if isinstance(published_at, str) else None,
+        "published_at": published_at,
     }
 
 
@@ -211,14 +317,17 @@ def validate_pending(
     claims = _claim_events(database, limit=limit, min_age=min_age)
     counts = {"breaking": 0, "confirmed": 0, "contradicted": 0, "developing": 0}
     errored = 0
-    for event_id, query, first_seen_at, previous_status in claims:
+    for claim in claims:
         try:
-            sources = [source for item in lookup(query, 5) if (source := _source(item))]
+            sources = [
+                source for item in lookup(claim.query, 5)
+                if (source := _source(item, claim))
+            ]
             with open_database(database) as connection:
                 for source in sources:
                     record_validation(
                         connection,
-                        event_id,
+                        claim.event_id,
                         url=str(source["url"]),
                         title=source["title"],
                         publisher=source["publisher"],
@@ -227,7 +336,7 @@ def validate_pending(
                     )
                 stored = connection.execute(
                     "SELECT stance, published_at FROM event_validations WHERE event_id=?",
-                    (event_id,),
+                    (claim.event_id,),
                 ).fetchall()
                 stances = {row[0] for row in stored}
                 if "disputing" in stances:
@@ -238,20 +347,32 @@ def validate_pending(
                     status = "developing"
                 else:
                     status = "breaking"
-                published = next((row[1] for row in stored if row[0] == "corroborating" and row[1]), None)
+                published = connection.execute(
+                    """
+                    SELECT published_at FROM event_validations
+                    WHERE event_id=? AND stance='corroborating'
+                      AND published_at IS NOT NULL AND julianday(published_at) IS NOT NULL
+                    ORDER BY julianday(published_at) ASC LIMIT 1
+                    """,
+                    (claim.event_id,),
+                ).fetchone()
+                earliest_published = published[0] if published else None
                 set_event_status(
                     connection,
-                    event_id,
+                    claim.event_id,
                     status,
-                    lead_seconds=_lead_seconds(first_seen_at, published) if status == "confirmed" else None,
+                    lead_seconds=(
+                        _lead_seconds(claim.first_seen_at, earliest_published)
+                        if status == "confirmed" else None
+                    ),
                 )
             counts[status] += 1
         except Exception as error:
             with open_database(database) as connection:
                 set_event_status(
                     connection,
-                    event_id,
-                    previous_status,
+                    claim.event_id,
+                    claim.previous_status,
                     error=f"{type(error).__name__}: {error}"[:1000],
                 )
             errored += 1

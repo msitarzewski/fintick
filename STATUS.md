@@ -6,7 +6,7 @@ FinTick v2 is complete: one stream becomes distinct events; each event carries s
 stream-signal counts; independent RSS/news validation produces breaking/confirmed/contradicted/developing
 status with lead time; and the responsive Edge Board makes uncorroborated events visually primary. The
 canonical four-post NVDA fixture reaches one breaking event with four signals, facts, unified NVDA, and
-zero external sources. All 69 tests pass; all four worker processes were launched and verified; desktop
+zero external sources. All 80 tests pass; all four worker processes were launched and verified; desktop
 and mobile interfaces were rendered and inspected; the dashboard runs at http://127.0.0.1:8137.
 
 <!-- When ALL PRD.md §7 acceptance criteria pass, replace the line below with `DONE` + a
@@ -47,8 +47,8 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       rejects unknown/reused URIs, normalizes symbols/directions, and idempotently persists through
       the M1 API. Canonical fixture passes offline with an injected model response: 4 posts → 1 event,
       4 signals, unified NVDA; malformed top-level output and malformed sibling events are isolated.
-      67/67 tests green. Live `qwen3.8:27b` smoke is deferred: the runtime approval layer blocked the
-      local endpoint check; do not treat model-quality behavior as live-verified yet.
+      Live `qwen3.8:27b` verified 2026-08-25 against the canonical fixture: one event, four signals,
+      unified NVDA, and three facts including the −3.2% move.
 - [x] **M3 — Facts.** Structured claim extraction per event (down-day count, % move, etc.), local model.
       ✅ 2026-08-25: Facts are extracted in the existing single F2 model call (no extra 27B pass) as
       validated `{label,value[,unit]}` objects, stored in `events.facts_json`, and exposed by
@@ -75,13 +75,29 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       ✅ 2026-08-25: `tests/test_acceptance_v2.py` verifies the complete offline fixture path and
       operational docs. README/run-demo describe v2; Supervisor launches ingest/aggregate/validate/
       dashboard on 8137. All four watch processes completed initial cycles and stayed alive; SIGTERM
-      shutdown was clean for workers. Full suite: 69/69. Repository excludes runtime DBs/logs/caches;
+      shutdown was clean for workers. Full suite: 80/80. Repository excludes runtime DBs/logs/caches;
       autonomous `fintick-build` cron was already paused.
+
+## Post-acceptance integrity hardening (2026-08-25)
+
+- RSS search results are candidates, not automatic corroboration: title-level entity and claim overlap
+  classifies them conservatively as corroborating, partial, disputing, or unrelated.
+- Confirmed-event lead time uses the earliest parseable corroborating publication.
+- Existing stream-signal membership wins over model headline wording, preventing duplicate events when
+  rolling passes rephrase the same event while preserving validation state. Candidates bridging multiple
+  existing events are rejected and isolated; SQLite enforces one-event ownership for future signal links.
+- Factless model events are rejected independently. Live Google News RSS validation moved the isolated
+  NVDA smoke event from `breaking` to `confirmed` using an on-claim seventh-session story.
+- Live operational tuning against `data/fintick.db` established 10 posts as the reliable default batch:
+  one uncontended pass selected 10 real posts, created 5 events, and reported 0 errors in about 100
+  seconds. The six-hour window retains its explicit 200-post cap. Qwen aggregation disables reasoning
+  and caps JSON output at 4096 tokens to avoid wasting the request timeout on hidden reasoning.
 
 ## Build config (now enforced at the Hermes level)
 - **Local Qwen ONLY** — cloud `fallback_providers` is disabled; **do not** expect or rely on a
   fallback. If the local model errors, mark the item errored and continue.
-- Streaming is on, so long aggregation turns won't be killed by the old non-stream timeout.
+- Aggregate uses a bounded, non-streaming JSON request. The 10-post default is sized to finish inside
+  the 300-second model timeout on the current 27B local runtime; callers may override it up to 200.
 - Everything else per AGENTS.md: offline-fixture-first, commit per milestone, no sudo (write the
   supervisor script), no `git push`, DONE + pause when §7 all pass.
 

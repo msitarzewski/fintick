@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+import sqlite3
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -19,6 +21,7 @@ MODEL_ENDPOINT = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "qwen3.8:27b"
 WINDOW = timedelta(hours=6)
 MAX_POSTS = 200
+DEFAULT_BATCH = 10
 SYSTEM_PROMPT = """You aggregate posts from ONE fast financial stream into distinct real-world events.
 Return JSON with one key, events, an array. Each event must contain:
 canonical_headline (concise), summary (one sentence), importance (integer 1-5),
@@ -122,8 +125,8 @@ def _parse_event(
         })
 
     raw_facts = raw.get("facts")
-    if not isinstance(raw_facts, list):
-        raise ValueError("facts must be an array")
+    if not isinstance(raw_facts, list) or not raw_facts:
+        raise ValueError("facts must be a non-empty array")
     facts: list[dict[str, Any]] = []
     for item in raw_facts:
         if not isinstance(item, dict):
@@ -133,6 +136,12 @@ def _parse_event(
             raise ValueError("each fact requires a label")
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             raise ValueError("each fact requires a scalar value")
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("fact string values must not be blank")
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("fact numeric values must be finite")
         fact: dict[str, Any] = {"label": label.strip(), "value": value}
         unit = item.get("unit")
         if isinstance(unit, str) and unit.strip():
@@ -231,8 +240,9 @@ def call_local_model(
     payload = json.dumps({
         "model": model,
         "stream": False,
+        "think": False,
         "format": "json",
-        "options": {"temperature": 0.1, "num_ctx": 32768, "num_predict": 8192},
+        "options": {"temperature": 0.1, "num_ctx": 32768, "num_predict": 4096},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -258,7 +268,7 @@ def call_local_model(
 def aggregate_once(
     database: str | Path,
     *,
-    limit: int = MAX_POSTS,
+    limit: int = DEFAULT_BATCH,
     call_model: Callable[[str], str] = call_local_model,
 ) -> AggregateStats:
     """Aggregate one rolling window with one model call and persist valid events."""
@@ -276,13 +286,18 @@ def aggregate_once(
         return AggregateStats(selected=len(posts), errored=1)
 
     created = 0
+    persistence_errors = 0
     with open_database(database) as connection:
         for event in parsed.events:
-            _, was_created = upsert_event(connection, event)
+            try:
+                _, was_created = upsert_event(connection, event)
+            except (ValueError, sqlite3.IntegrityError):
+                persistence_errors += 1
+                continue
             created += int(was_created)
     return AggregateStats(
         selected=len(posts),
-        events=len(parsed.events),
+        events=len(parsed.events) - persistence_errors,
         created=created,
-        errored=parsed.errored,
+        errored=parsed.errored + persistence_errors,
     )

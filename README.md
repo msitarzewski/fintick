@@ -58,7 +58,8 @@ python3 -m fintick serve --port 8137
 The default worker cadence is:
 
 - ingest every 15 minutes,
-- aggregate one rolling six-hour window every 15 minutes,
+- aggregate one rolling six-hour window every 15 minutes (10 posts by default on the current local
+  model; configurable with `--limit` up to the 200-post safety cap),
 - validate/revalidate unconfirmed events every 5 minutes,
 - refresh the browser every 20 seconds.
 

@@ -177,6 +177,67 @@ class UpsertEventTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(base_rows, 2)
 
+    def test_candidate_bridging_two_events_is_rejected_without_relinking_signals(self) -> None:
+        uris = self._all_uris()
+        with open_database(self.db) as connection:
+            first_id, _ = upsert_event(
+                connection,
+                _make_event(headline="EVENT A", primary_instrument="NVDA", post_uris=uris[:2]),
+            )
+            second_id, _ = upsert_event(
+                connection,
+                _make_event(headline="EVENT B", primary_instrument="AMD", post_uris=uris[2:]),
+            )
+            with self.assertRaisesRegex(ValueError, "multiple existing events"):
+                upsert_event(
+                    connection,
+                    _make_event(
+                        headline="MODEL COMBINED A AND B",
+                        primary_instrument="NVDA",
+                        post_uris=uris,
+                    ),
+                )
+            ownership = connection.execute(
+                "SELECT post_uri, COUNT(*) FROM event_signals GROUP BY post_uri ORDER BY post_uri"
+            ).fetchall()
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO event_signals (event_id, post_uri, observed_at) VALUES (?, ?, ?)",
+                    (second_id, uris[0], T3),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE event_signals SET post_uri=? WHERE event_id=? AND post_uri=?",
+                    (uris[0], second_id, uris[2]),
+                )
+            event_count = connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(event_count, 2)
+        self.assertEqual(ownership, [(uri, 1) for uri in sorted(uris)])
+
+    def test_existing_duplicate_signal_ownership_fails_startup(self) -> None:
+        uris = self._all_uris()
+        with open_database(self.db) as connection:
+            first_id, _ = upsert_event(
+                connection,
+                _make_event(headline="EVENT A", primary_instrument="NVDA", post_uris=(uris[0],)),
+            )
+            second_id, _ = upsert_event(
+                connection,
+                _make_event(headline="EVENT B", primary_instrument="AMD", post_uris=(uris[1],)),
+            )
+            connection.execute("DROP TRIGGER IF EXISTS event_signals_one_event")
+            connection.execute("DROP TRIGGER IF EXISTS event_signals_one_event_update")
+            connection.execute(
+                "INSERT INTO event_signals (event_id, post_uri, observed_at) VALUES (?, ?, ?)",
+                (second_id, uris[0], T3),
+            )
+        self.assertNotEqual(first_id, second_id)
+        with self.assertRaisesRegex(RuntimeError, "ambiguous signal ownership"):
+            with open_database(self.db):
+                pass
+
 
 class StatusIsOwnedByValidateTests(unittest.TestCase):
     def test_upsert_never_resets_confirmed_status(self) -> None:
@@ -231,6 +292,26 @@ class RecordValidationTests(unittest.TestCase):
                 events = load_events(connection)
                 self.assertEqual(len(events[0]["validations"]), 1)
                 self.assertEqual(events[0]["validations"][0]["url"], url)
+
+    def test_rehunt_repairs_malformed_legacy_publication_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "fintick.db"
+            with open_database(db) as connection:
+                event_id, _ = upsert_event(connection, _make_event())
+                url = "https://example.com/legacy-time"
+                record_validation(
+                    connection, event_id, url=url, title="story", publisher="wire",
+                    stance="corroborating", published_at="not-a-timestamp",
+                )
+                record_validation(
+                    connection, event_id, url=url, title="story", publisher="wire",
+                    stance="corroborating", published_at=T1,
+                )
+                published_at = connection.execute(
+                    "SELECT published_at FROM event_validations WHERE event_id=? AND url=?",
+                    (event_id, url),
+                ).fetchone()[0]
+        self.assertEqual(published_at, T1)
 
     def test_distinct_urls_both_persist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

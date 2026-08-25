@@ -81,6 +81,71 @@ class ValidatePipelineTests(unittest.TestCase):
         self.assertIn("NVIDIA", queries[0])
         self.assertIn("seven", queries[0].lower())
 
+    def test_unrelated_search_hit_does_not_confirm_event(self) -> None:
+        result = validate_pending(
+            self.database,
+            lookup=lambda _query, _limit: [{
+                "url": "https://example.com/new-gpu",
+                "title": "NVIDIA Corporation announces seven new products after shares fall",
+                "publisher": "Example Wire",
+                "published_at": "2026-08-24T15:10:11+00:00",
+            }],
+            min_age=0,
+        )
+        with open_database(self.database) as connection:
+            event = load_events(connection)[0]
+        self.assertEqual((result.breaking, result.confirmed), (1, 0))
+        self.assertEqual(event["status"], "breaking")
+        self.assertEqual(event["validations"], [])
+
+    def test_matching_unlabeled_search_hit_confirms_event(self) -> None:
+        result = validate_pending(
+            self.database,
+            lookup=lambda _query, _limit: [{
+                "url": "https://example.com/seven-day-slide",
+                "title": "Nvidia falls for seventh day in longest slide since 2022",
+                "publisher": "Example Wire",
+                "published_at": "2026-08-24T15:10:11+00:00",
+            }],
+            min_age=0,
+        )
+        with open_database(self.database) as connection:
+            event = load_events(connection)[0]
+        self.assertEqual((result.breaking, result.confirmed), (0, 1))
+        self.assertEqual(event["status"], "confirmed")
+        self.assertEqual(len(event["validations"]), 1)
+
+    def test_lead_time_uses_earliest_corroborating_story(self) -> None:
+        stories = [
+            {
+                "url": "https://example.com/malformed-time",
+                "title": "Nvidia falls for seventh day in longest slide since 2022",
+                "publisher": "Broken Clock Wire",
+                "published_at": "not-a-timestamp",
+            },
+            {
+                "url": "https://example.com/later",
+                "title": "Nvidia falls for seventh day in longest slide since 2022",
+                "publisher": "Later Wire",
+                "published_at": "2026-08-24T15:20:11+00:00",
+            },
+            {
+                "url": "https://example.com/earlier",
+                "title": "Nvidia falls for seventh day in longest slide since 2022",
+                "publisher": "Earlier Wire",
+                "published_at": "2026-08-24T15:05:11+00:00",
+            },
+        ]
+        validate_pending(self.database, lookup=lambda _query, _limit: stories, min_age=0)
+        with open_database(self.database) as connection:
+            event = load_events(connection)[0]
+        malformed = next(
+            source for source in event["validations"]
+            if source["publisher"] == "Broken Clock Wire"
+        )
+        self.assertIsNone(malformed["published_at"])
+        self.assertEqual(event["lead_seconds"], 300)
+
 
 if __name__ == "__main__":
     unittest.main()

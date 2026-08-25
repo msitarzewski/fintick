@@ -167,6 +167,24 @@ def _migrate_and_backfill(connection: sqlite3.Connection) -> None:
         _reconcile_hash(connection, digest)
 
 
+def _assert_event_signal_ownership(connection: sqlite3.Connection) -> None:
+    duplicate = connection.execute(
+        """
+        SELECT post_uri, COUNT(DISTINCT event_id)
+        FROM event_signals
+        GROUP BY post_uri
+        HAVING COUNT(DISTINCT event_id) > 1
+        ORDER BY post_uri
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicate:
+        raise RuntimeError(
+            "ambiguous signal ownership: "
+            f"{duplicate[0]!r} is linked to {duplicate[1]} events; repair the database before startup"
+        )
+
+
 @contextmanager
 def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
     """Open and initialize a FinTick database, committing on success."""
@@ -186,6 +204,7 @@ def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
         # them on next open, no ALTER or backfill.
         for statement in V2_SCHEMA:
             connection.execute(statement)
+        _assert_event_signal_ownership(connection)
         yield connection
         connection.commit()
     except BaseException:
@@ -279,6 +298,29 @@ V2_SCHEMA = (
     )
     """,
     """
+    CREATE TRIGGER IF NOT EXISTS event_signals_one_event
+    BEFORE INSERT ON event_signals
+    WHEN EXISTS (
+        SELECT 1 FROM event_signals
+        WHERE post_uri = NEW.post_uri AND event_id != NEW.event_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'post_uri already assigned to another event');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS event_signals_one_event_update
+    BEFORE UPDATE OF event_id, post_uri ON event_signals
+    WHEN EXISTS (
+        SELECT 1 FROM event_signals
+        WHERE post_uri = NEW.post_uri
+          AND NOT (event_id = OLD.event_id AND post_uri = OLD.post_uri)
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'post_uri already assigned to another event');
+    END
+    """,
+    """
     CREATE TABLE IF NOT EXISTS event_validations (
         event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
         url TEXT NOT NULL,
@@ -359,50 +401,74 @@ def event_key(headline: str, primary_instrument: str | None = None) -> str:
 def upsert_event(connection: sqlite3.Connection, event: V2Event) -> tuple[int, bool]:
     """Record one merged event, returning (event_id, created).
 
-    Idempotent on the event ``key`` and never touches validation state —
-    status, validating sources, and lead time are owned exclusively by the
-    F4 validate stage, so re-aggregation can never clobber a flip to
-    ``confirmed``. Re-running aggregation over the rolling window therefore
-    never creates a second row or resets a validated event: it only widens
-    the first/last-seen span, takes the max importance, and unions the
-    stream signals.
+    Idempotent on the event ``key`` and stable stream-post membership. A
+    rolling model pass may reword the canonical headline; overlap with an
+    existing signal therefore wins over the newly derived headline key. The
+    merge never touches validation state — status, validating sources, and
+    lead time are owned exclusively by the F4 validate stage. Re-running
+    aggregation only widens the first/last-seen span, takes the max
+    importance, refreshes descriptive fields, and unions stream signals.
     """
     notes = event.signal_notes or []
     facts_json = json.dumps(event.facts, separators=(",", ":"), ensure_ascii=False)
     instruments_json = json.dumps(event.instruments, separators=(",", ":"), ensure_ascii=False)
     now = datetime.now(UTC).isoformat()
 
-    cursor = connection.execute(
-        """
-        INSERT INTO events (
-            key, headline, summary, importance, facts_json, instruments_json,
-            first_seen_at, last_seen_at, observed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(key) DO NOTHING
-        """,
-        (
-            event.key, event.headline, event.summary, event.importance,
-            facts_json, instruments_json,
-            event.first_seen_at, event.last_seen_at, now, now,
-        ),
-    )
-    if cursor.rowcount == 1:
-        event_id = int(cursor.lastrowid or 0)
-        created = True
-    else:
-        # Already known — merge into it. Status, validation state, and lead
-        # time are owned by the F4 validate stage, so touch nothing but the
-        # identity/summary fields and the stream-seen span.
-        existing_id, existing_first, existing_last, existing_importance = (
-            connection.execute(
-                "SELECT id, first_seen_at, last_seen_at, importance "
-                "FROM events WHERE key = ?",
-                (event.key,),
-            ).fetchone()
+    # Resolve every stable identity signal before writing. A candidate that
+    # bridges distinct existing events is ambiguous model output, not evidence
+    # that either event should absorb the other.
+    candidate_event_ids: set[int] = set()
+    if event.post_uris:
+        placeholders = ",".join("?" for _ in event.post_uris)
+        candidate_event_ids.update(
+            int(row[0])
+            for row in connection.execute(
+                f"SELECT DISTINCT event_id FROM event_signals WHERE post_uri IN ({placeholders})",
+                event.post_uris,
+            ).fetchall()
         )
-        event_id = int(existing_id)
-        created = False
-        # Widen the span; both columns are NOT NULL.
+    key_row = connection.execute(
+        "SELECT id FROM events WHERE key = ?", (event.key,)
+    ).fetchone()
+    if key_row:
+        candidate_event_ids.add(int(key_row[0]))
+    if len(candidate_event_ids) > 1:
+        raise ValueError("event candidate overlaps multiple existing events")
+
+    created = False
+    if candidate_event_ids:
+        event_id = next(iter(candidate_event_ids))
+    else:
+        cursor = connection.execute(
+            """
+            INSERT INTO events (
+                key, headline, summary, importance, facts_json, instruments_json,
+                first_seen_at, last_seen_at, observed_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (
+                event.key, event.headline, event.summary, event.importance,
+                facts_json, instruments_json,
+                event.first_seen_at, event.last_seen_at, now, now,
+            ),
+        )
+        if cursor.rowcount == 1:
+            event_id = int(cursor.lastrowid or 0)
+            created = True
+        else:
+            # A concurrent writer may have inserted the key after resolution.
+            event_id = int(connection.execute(
+                "SELECT id FROM events WHERE key = ?", (event.key,)
+            ).fetchone()[0])
+
+    if not created:
+        # Already known by key or by stable stream membership. Validation state
+        # remains untouched while descriptive model output is refreshed.
+        existing_first, existing_last, existing_importance = connection.execute(
+            "SELECT first_seen_at, last_seen_at, importance FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
         merged_first = min(existing_first, event.first_seen_at)
         merged_last = max(existing_last, event.last_seen_at)
         if existing_importance is None:
@@ -477,7 +543,10 @@ def record_validation(
         """
         UPDATE event_validations
         SET title = ?, publisher = ?, stance = ?,
-            published_at = COALESCE(published_at, ?)
+            published_at = CASE
+                WHEN julianday(published_at) IS NOT NULL THEN published_at
+                ELSE ?
+            END
         WHERE event_id = ? AND url = ?
         """,
         (title, publisher, stance, published_at, event_id, url),
