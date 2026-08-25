@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from fintick import __version__
-from fintick.aggregate import DEFAULT_BATCH, DEFAULT_HERMES_MODEL, MAX_POSTS, aggregate_once
+from fintick.aggregate import DEFAULT_BATCH, MAX_POSTS, aggregate_once
 from fintick.dashboard import serve_dashboard
 from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
@@ -61,16 +61,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"maximum oldest-pending posts per batch (default: {DEFAULT_BATCH}; cap: {MAX_POSTS})",
     )
     aggregate.add_argument(
-        "--provider", choices=("hermes", "local"), default="hermes",
-        help="model route (default: hermes, using existing OAuth)",
-    )
-    aggregate.add_argument(
         "--model", default=None,
-        help=f"model override (Hermes default: {DEFAULT_HERMES_MODEL})",
+        help="model name override (default: $FINTICK_LLM_MODEL, else qwen3.8:27b)",
     )
     aggregate.add_argument(
-        "--hermes-executable", default="hermes",
-        help="Hermes executable for the OAuth provider route",
+        "--base-url", default=None,
+        help="OpenAI-compatible endpoint override (default: $FINTICK_LLM_BASE_URL, "
+             "else local ollama)",
+    )
+    aggregate.add_argument(
+        "--api-key", default=None,
+        help="API key override (default: $FINTICK_LLM_API_KEY)",
     )
     aggregate.add_argument("--watch", action="store_true", help="aggregate continuously")
     aggregate.add_argument(
@@ -172,13 +173,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "aggregate":
         def aggregate_cycle() -> None:
-            model = args.model or (DEFAULT_HERMES_MODEL if args.provider == "hermes" else None)
             stats = aggregate_once(
                 args.database,
                 limit=args.limit,
-                provider=args.provider,
-                model=model,
-                hermes_executable=args.hermes_executable,
+                model=args.model,
+                base_url=args.base_url,
+                api_key=args.api_key,
             )
             print(
                 f"{timestamp()} aggregate selected={stats.selected} events={stats.events} "

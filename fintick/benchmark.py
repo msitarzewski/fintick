@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from fintick.aggregate import (
-    DEFAULT_HERMES_MODEL,
     DEFAULT_MODEL,
-    call_hermes_model,
-    call_local_model,
+    call_inference,
     parse_accounted_aggregation,
 )
 
@@ -131,20 +129,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="reference/benchmark_burst_28.json",
         help="fixed benchmark corpus JSON",
     )
-    parser.add_argument("--provider", choices=("hermes", "local"), default="hermes")
-    parser.add_argument("--model", default=None, help="provider model override")
-    parser.add_argument("--hermes-executable", default="hermes")
+    parser.add_argument("--model", default=None, help="model name override")
+    parser.add_argument(
+        "--base-url", default=None,
+        help="OpenAI-compatible endpoint override (default: local ollama)",
+    )
+    parser.add_argument("--api-key", default=None, help="API key override")
     args = parser.parse_args(argv)
-    if args.provider == "hermes":
-        model = args.model or DEFAULT_HERMES_MODEL
-        call_model = lambda prompt: call_hermes_model(
-            prompt, executable=args.hermes_executable, model=model
-        )
-    else:
-        model = args.model or DEFAULT_MODEL
-        call_model = lambda prompt: call_local_model(prompt, model=model)
+    model = args.model or DEFAULT_MODEL
+    call_model = lambda prompt: call_inference(
+        prompt, base_url=args.base_url, api_key=args.api_key, model=model
+    )
     score = run_benchmark(args.corpus, call_model=call_model)
-    score["provider"] = args.provider
     score["model"] = model
     print(json.dumps(score, ensure_ascii=False, indent=2))
     return 0

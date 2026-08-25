@@ -55,7 +55,6 @@ class ServiceSetupTests(unittest.TestCase):
     def test_dry_run_generates_portable_user_systemd_units(self) -> None:
         environment = os.environ.copy()
         environment["FINTICK_PYTHON"] = "/usr/bin/python3"
-        environment["FINTICK_HERMES"] = "/opt/hermes/bin/hermes"
         completed = subprocess.run(
             ["bash", str(SETUP), "--dry-run"],
             cwd=ROOT,
@@ -68,11 +67,13 @@ class ServiceSetupTests(unittest.TestCase):
         output = completed.stdout
         self.assertIn("fintick-aggregate.service", output)
         self.assertIn("systemctl --user", output)
-        self.assertIn("--provider hermes", output)
-        self.assertIn("--model gpt-5.6-luna", output)
-        self.assertIn("/opt/hermes/bin/hermes", output)
+        self.assertIn("-m fintick aggregate", output)
+        # Untethered from Hermes: no OAuth subprocess route in the generated units.
+        self.assertNotIn("--provider", output)
+        self.assertNotIn("hermes", output.lower())
+        # Both aggregate and validate read the config/secrets env file.
         self.assertEqual(
-            output.count("EnvironmentFile=-%h/.config/fintick/environment"), 1
+            output.count("EnvironmentFile=-%h/.config/fintick/environment"), 2
         )
         self.assertNotIn("supervisor", output.lower())
         self.assertNotIn("michael", SETUP.read_text(encoding="utf-8").lower())

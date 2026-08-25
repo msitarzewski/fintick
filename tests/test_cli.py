@@ -52,8 +52,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         aggregate_once.assert_called_once_with(
-            "/tmp/events.db", limit=4, provider="hermes",
-            model="gpt-5.6-luna", hermes_executable="hermes",
+            "/tmp/events.db", limit=4, model=None, base_url=None, api_key=None,
         )
         self.assertIn(
             "aggregate selected=4 events=1 new=1 ignored=0 errored=0",
@@ -75,9 +74,9 @@ class CliTests(unittest.TestCase):
         aggregate_once.assert_called_once_with(
             "/tmp/events.db",
             limit=50,
-            provider="hermes",
-            model="gpt-5.6-luna",
-            hermes_executable="hermes",
+            model=None,
+            base_url=None,
+            api_key=None,
         )
         self.assertIn("ignored=30", output.getvalue())
 

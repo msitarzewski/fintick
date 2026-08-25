@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
-import subprocess
 import urllib.error
 import urllib.request
 import uuid
@@ -25,9 +25,13 @@ from fintick.storage import (
 )
 
 DIRECTIONS = {"up", "down", "flat"}
-MODEL_ENDPOINT = "http://localhost:11434/api/chat"
-DEFAULT_MODEL = "qwen3.8:27b"
-DEFAULT_HERMES_MODEL = "gpt-5.6-luna"
+# Inference is a plain OpenAI-compatible endpoint (POST {base_url}/chat/completions).
+# Defaults to a free local ollama server; point these at any OpenAI-compatible
+# provider for cloud. No Hermes, OAuth, or HOME dependency.
+LLM_BASE_URL = os.environ.get("FINTICK_LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_API_KEY = os.environ.get("FINTICK_LLM_API_KEY", "ollama")
+LLM_MODEL = os.environ.get("FINTICK_LLM_MODEL", "qwen3.8:27b")
+DEFAULT_MODEL = LLM_MODEL  # backward-compat alias
 WINDOW = timedelta(hours=6)
 MAX_POSTS = 200
 DEFAULT_BATCH = 50
@@ -392,80 +396,57 @@ def _load_window(database: str | Path, limit: int) -> list[dict[str, str]]:
     ]
 
 
-def call_hermes_model(
+def call_inference(
     prompt: str,
     *,
-    executable: str = "hermes",
-    provider: str = "openai-codex",
-    model: str = "gpt-5.6-luna",
-    timeout: float = 180,
-) -> str:
-    """Call a Hermes-managed OAuth model without handling credentials here."""
-    full_prompt = f"{SYSTEM_PROMPT}\n\nPOSTS:\n{prompt}"
-    argv = [
-        executable,
-        "--ignore-rules",
-        "--safe-mode",
-        "--provider", provider,
-        "--model", model,
-        "--reasoning", "none",
-        # Valid Hermes toolset that resolves to no core tools under safe mode.
-        "-t", "context_engine",
-        "-z", full_prompt,
-    ]
-    try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(f"Hermes aggregation request failed: {type(error).__name__}") from error
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"Hermes aggregation request failed with exit code {completed.returncode}"
-        )
-    content = completed.stdout.strip()
-    if not content:
-        raise RuntimeError("Hermes aggregation model returned empty content")
-    return content
-
-
-def call_local_model(
-    prompt: str,
-    *,
-    endpoint: str = MODEL_ENDPOINT,
-    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
     timeout: float = 300.0,
 ) -> str:
-    """Make one forced-JSON Ollama call for the complete stream window."""
+    """Make one forced-JSON call to an OpenAI-compatible chat endpoint.
+
+    Works for a local ollama server (``/v1``) and any cloud provider alike; the
+    endpoint, key, and model come from the environment (or the overrides here).
+    """
+    base_url = (base_url or LLM_BASE_URL).rstrip("/")
+    api_key = api_key or LLM_API_KEY
+    model = model or LLM_MODEL
     payload = json.dumps({
         "model": model,
         "stream": False,
-        "think": False,
-        "format": "json",
-        "options": {"temperature": 0.1, "num_ctx": 32768, "num_predict": 4096},
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
     }).encode()
     request = urllib.request.Request(
-        endpoint,
+        f"{base_url}/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.load(response)
-        content = data["message"]["content"]
-    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError) as error:
-        raise RuntimeError(f"local aggregation request failed: {error}") from error
-    if not isinstance(content, str):
-        raise RuntimeError("local aggregation model returned non-text content")
+        content = data["choices"][0]["message"]["content"]
+    except (
+        OSError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        IndexError,
+    ) as error:
+        raise RuntimeError(f"aggregation request failed: {error}") from error
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("aggregation model returned empty or non-text content")
     return content
 
 
@@ -474,9 +455,9 @@ def aggregate_once(
     *,
     limit: int = DEFAULT_BATCH,
     call_model: Callable[[str], str] | None = None,
-    provider: str = "hermes",
+    base_url: str | None = None,
+    api_key: str | None = None,
     model: str | None = None,
-    hermes_executable: str = "hermes",
 ) -> AggregateStats:
     """Aggregate the oldest pending posts and persist a decision for each."""
     posts = _load_pending(database, limit)
@@ -497,18 +478,9 @@ def aggregate_once(
 
     try:
         if call_model is None:
-            if provider == "hermes":
-                call_model = lambda value: call_hermes_model(
-                    value,
-                    executable=hermes_executable,
-                    model=model or DEFAULT_HERMES_MODEL,
-                )
-            elif provider == "local":
-                call_model = lambda value: call_local_model(
-                    value, model=model or DEFAULT_MODEL
-                )
-            else:
-                raise ValueError(f"unknown aggregation provider: {provider}")
+            call_model = lambda value: call_inference(
+                value, base_url=base_url, api_key=api_key, model=model
+            )
         raw_content = call_model(prompt)
         raw_object = _json_object(raw_content)
         raw_events = raw_object.get("events")
