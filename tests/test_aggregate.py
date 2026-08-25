@@ -33,6 +33,10 @@ def _event(**overrides: object) -> dict[str, object]:
                 "direction": "DOWN",
             }
         ],
+        "facts": [
+            {"label": "consecutive down days", "value": "7"},
+            {"label": "longest losing streak since", "value": "2022"},
+        ],
         "stream_post_uris": list(URIS),
         "importance": 4,
     }
@@ -58,6 +62,10 @@ class ParseAggregationTests(unittest.TestCase):
             "type": "equity",
             "direction": "down",
         },))
+        self.assertEqual(event.facts, (
+            {"label": "consecutive down days", "value": "7"},
+            {"label": "longest losing streak since", "value": "2022"},
+        ))
         self.assertEqual(event.first_seen_at, "2026-08-24T15:00:00+00:00")
         self.assertEqual(event.last_seen_at, "2026-08-24T15:03:00+00:00")
 

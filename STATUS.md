@@ -4,7 +4,7 @@
      one-paragraph summary, then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M3 — Facts (M2 aggregate done 2026-08-25; live model smoke deferred).
+**Current milestone:** M4 — Validate (M3 facts done 2026-08-25).
 
 ## The v2 pivot (read this first every fire)
 v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
@@ -40,7 +40,10 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       4 signals, unified NVDA; malformed top-level output and malformed sibling events are isolated.
       67/67 tests green. Live `qwen3.8:27b` smoke is deferred: the runtime approval layer blocked the
       local endpoint check; do not treat model-quality behavior as live-verified yet.
-- [ ] **M3 — Facts.** Structured claim extraction per event (down-day count, % move, etc.), local model.
+- [x] **M3 — Facts.** Structured claim extraction per event (down-day count, % move, etc.), local model.
+      ✅ 2026-08-25: Facts are extracted in the existing single F2 model call (no extra 27B pass) as
+      validated `{label,value[,unit]}` objects, stored in `events.facts_json`, and exposed by
+      `load_events`. Canonical NVDA acceptance carries down-day count and streak-year facts.
 - [ ] **M4 — Validate (core).** External news hunt via `curl` (RSS/news JSON, NO browser) →
       `validating_sources` + `status` (breaking / confirmed / contradicted / developing) + lead time.
       Re-runnable so `breaking` can flip to `confirmed`. **Fixture offline → `breaking`, 0 sources.**

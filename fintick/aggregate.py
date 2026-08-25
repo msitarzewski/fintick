@@ -22,7 +22,8 @@ MAX_POSTS = 200
 SYSTEM_PROMPT = """You aggregate posts from ONE fast financial stream into distinct real-world events.
 Return JSON with one key, events, an array. Each event must contain:
 canonical_headline (concise), summary (one sentence), importance (integer 1-5),
-instruments (array of {symbol,name,type,direction}; direction is up/down/flat), and
+instruments (array of {symbol,name,type,direction}; direction is up/down/flat),
+facts (array of {label,value} for concrete claims such as percentage moves, counts, prices, dates), and
 stream_post_uris (the exact URI strings supporting that event).
 Merge semantic repeats and updates of the same event even when wording, casing, or ticker/name forms
 differ. In particular $NVDA and NVIDIA refer to one instrument. A stream post belongs to at most one
@@ -120,6 +121,24 @@ def _parse_event(
             "direction": direction,
         })
 
+    raw_facts = raw.get("facts")
+    if not isinstance(raw_facts, list):
+        raise ValueError("facts must be an array")
+    facts: list[dict[str, Any]] = []
+    for item in raw_facts:
+        if not isinstance(item, dict):
+            raise ValueError("each fact must be an object")
+        label, value = item.get("label"), item.get("value")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("each fact requires a label")
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ValueError("each fact requires a scalar value")
+        fact: dict[str, Any] = {"label": label.strip(), "value": value}
+        unit = item.get("unit")
+        if isinstance(unit, str) and unit.strip():
+            fact["unit"] = unit.strip()
+        facts.append(fact)
+
     importance_raw = raw.get("importance")
     if isinstance(importance_raw, bool) or not isinstance(importance_raw, (int, str)):
         raise ValueError("importance must be an integer")
@@ -136,6 +155,7 @@ def _parse_event(
         headline.strip(),
         summary.strip(),
         primary_instrument=primary,
+        facts=tuple(facts),
         instruments=tuple(instruments),
         importance=importance,
         post_uris=tuple(uris),
