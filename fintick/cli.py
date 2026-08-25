@@ -12,6 +12,7 @@ from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
 from fintick.research import research_pending
 from fintick.runtime import run_periodically, timestamp
+from fintick.validate import validate_pending
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +63,21 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--watch", action="store_true", help="aggregate continuously")
     aggregate.add_argument(
         "--interval", type=float, default=900, help="watch interval in seconds (default: 900)"
+    )
+    validate = subparsers.add_parser(
+        "validate", help="hunt independent news and update event validation status"
+    )
+    validate.add_argument(
+        "--database", default="data/fintick.db", help="SQLite database path"
+    )
+    validate.add_argument("--limit", type=int, default=5, help="maximum events per hunt")
+    validate.add_argument(
+        "--min-age", type=float, default=900,
+        help="seconds before rechecking an unconfirmed event (default: 900)",
+    )
+    validate.add_argument("--watch", action="store_true", help="validate continuously")
+    validate.add_argument(
+        "--interval", type=float, default=300, help="watch interval in seconds (default: 300)"
     )
     enrich = subparsers.add_parser(
         "enrich", help="RETAINED v1-baseline only (v2 replaces enrich with aggregate): enrich pending canonical posts with local Qwen"
@@ -153,6 +169,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_periodically("aggregate", aggregate_cycle, args.interval)
         else:
             aggregate_cycle()
+        return 0
+
+    if args.command == "validate":
+        def validate_cycle() -> None:
+            stats = validate_pending(
+                args.database, limit=args.limit, min_age=args.min_age
+            )
+            print(
+                f"{timestamp()} validate selected={stats.selected} "
+                f"breaking={stats.breaking} confirmed={stats.confirmed} "
+                f"contradicted={stats.contradicted} developing={stats.developing} "
+                f"errored={stats.errored}", flush=True
+            )
+        if args.watch:
+            run_periodically("validate", validate_cycle, args.interval)
+        else:
+            validate_cycle()
         return 0
 
     if args.command == "enrich":

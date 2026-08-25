@@ -14,6 +14,7 @@ from fintick.aggregate import AggregateStats
 from fintick.cli import main
 from fintick.enrich import EnrichStats
 from fintick.research import ResearchStats
+from fintick.validate import ValidateStats
 
 
 class CliTests(unittest.TestCase):
@@ -52,6 +53,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         aggregate_once.assert_called_once_with("/tmp/events.db", limit=4)
         self.assertIn("aggregate selected=4 events=1 new=1 errored=0", output.getvalue())
+
+    @mock.patch(
+        "fintick.cli.validate_pending",
+        return_value=ValidateStats(selected=2, breaking=1, confirmed=1),
+    )
+    def test_validate_command_reports_status_counts(self, validate_pending: mock.Mock) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["validate", "--database", "/tmp/events.db", "--limit", "2"])
+
+        self.assertEqual(result, 0)
+        validate_pending.assert_called_once_with("/tmp/events.db", limit=2, min_age=900)
+        self.assertIn(
+            "validate selected=2 breaking=1 confirmed=1 contradicted=0 developing=0 errored=0",
+            output.getvalue(),
+        )
 
     def test_research_command_reports_no_eligible_items(self) -> None:
         output = io.StringIO()

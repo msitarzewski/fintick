@@ -4,7 +4,7 @@
      one-paragraph summary, then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M4 — Validate (M3 facts done 2026-08-25).
+**Current milestone:** M5 — v2 event dashboard (M4 validation done 2026-08-25).
 
 ## The v2 pivot (read this first every fire)
 v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
@@ -44,9 +44,14 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       ✅ 2026-08-25: Facts are extracted in the existing single F2 model call (no extra 27B pass) as
       validated `{label,value[,unit]}` objects, stored in `events.facts_json`, and exposed by
       `load_events`. Canonical NVDA acceptance carries down-day count and streak-year facts.
-- [ ] **M4 — Validate (core).** External news hunt via `curl` (RSS/news JSON, NO browser) →
+- [x] **M4 — Validate (core).** External news hunt via `curl` (RSS/news JSON, NO browser) →
       `validating_sources` + `status` (breaking / confirmed / contradicted / developing) + lead time.
       Re-runnable so `breaking` can flip to `confirmed`. **Fixture offline → `breaking`, 0 sources.**
+      ✅ 2026-08-25: `fintick validate` performs a bounded, cached Google News RSS hunt, persists only
+      safe HTTP(S) external sources, and derives status from source stance. Empty search is a successful
+      `breaking` result; rerunning the same event with a stubbed corroborating story flips it to
+      `confirmed` with the URL and a verified 600-second wire lag. Lookup failures are isolated and
+      retained as event errors for retry. 69/69 tests green.
 - [ ] **M5 — Dashboard.** Event cards with the **validation badge front-and-center**; breaking events
       highlighted + sorted up; origin as "via the stream · seen N×" (NEVER "N sources"); lead time on
       confirmed. **Fix the v1 doubled-headline render bug** (title+text were concatenated).
