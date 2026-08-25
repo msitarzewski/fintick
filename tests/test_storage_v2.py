@@ -23,9 +23,11 @@ from fintick.storage import (
     STANCES,
     V2Event,
     event_key,
+    insert_post,
     load_events,
     open_database,
     record_validation,
+    set_post_aggregation_decision,
     set_event_status,
     upsert_event,
 )
@@ -33,7 +35,7 @@ from fintick.storage import (
 REPO_ROOT = Path(__file__).parents[1]
 NVDA_FIXTURE = REPO_ROOT / "reference" / "nvda_repost_cluster.json"
 
-V2_TABLES = {"events", "event_signals", "event_validations"}
+V2_TABLES = {"events", "event_signals", "event_validations", "post_aggregation_decisions"}
 V1_TABLES = {"posts", "enrichments", "research", "ingest_state"}
 
 # Fixed ISO-8601 UTC timestamps keep the tests deterministic.
@@ -95,6 +97,114 @@ class FreshDatabaseTests(unittest.TestCase):
                 second = _tables(connection)
             self.assertEqual(first, second)
             self.assertTrue(V2_TABLES.issubset(second))
+
+    def test_new_post_enters_pending_aggregation_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "fintick.db"
+            with open_database(db) as connection:
+                insert_post(connection, {
+                    "uri": "at://stream/new/1",
+                    "cid": "cid-new-1",
+                    "record": {
+                        "text": "New market event",
+                        "createdAt": T0,
+                    },
+                })
+                decision = connection.execute(
+                    "SELECT state, event_id, reason, attempts "
+                    "FROM post_aggregation_decisions WHERE post_uri=?",
+                    ("at://stream/new/1",),
+                ).fetchone()
+
+        self.assertEqual(decision, ("pending", None, None, 0))
+
+    def test_existing_posts_are_bootstrapped_into_accounting_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "fintick.db"
+            with open_database(db) as connection:
+                for uri, created_at in (
+                    ("at://stream/old", "2026-08-24T08:00:00+00:00"),
+                    ("at://stream/recent", T0),
+                ):
+                    insert_post(connection, {
+                        "uri": uri,
+                        "cid": "cid-" + uri.rsplit("/", 1)[-1],
+                        "record": {"text": uri, "createdAt": created_at},
+                    })
+                connection.execute("DROP TABLE post_aggregation_decisions")
+
+            with open_database(db) as connection:
+                decisions = connection.execute(
+                    "SELECT post_uri, state, reason FROM post_aggregation_decisions "
+                    "ORDER BY post_uri"
+                ).fetchall()
+
+        self.assertEqual(decisions, [
+            ("at://stream/old", "out_of_scope", "predates v2.1 bootstrap window"),
+            ("at://stream/recent", "pending", None),
+        ])
+
+    def test_terminal_post_decision_cannot_be_overwritten_by_duplicate_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "fintick.db"
+            with open_database(db) as connection:
+                insert_post(connection, {
+                    "uri": "at://stream/race/1",
+                    "cid": "cid-race-1",
+                    "record": {"text": "Market event", "createdAt": T0},
+                })
+                event_id, _ = upsert_event(connection, _make_event(
+                    headline="Race-safe market event",
+                    post_uris=("at://stream/race/1",),
+                ))
+                set_post_aggregation_decision(
+                    connection, "at://stream/race/1", "assigned", event_id=event_id
+                )
+                with self.assertRaisesRegex(ValueError, "already terminal"):
+                    set_post_aggregation_decision(
+                        connection,
+                        "at://stream/race/1",
+                        "ignored",
+                        reason="duplicate worker disagreed",
+                    )
+                decision = connection.execute(
+                    "SELECT state, event_id, attempts FROM post_aggregation_decisions "
+                    "WHERE post_uri='at://stream/race/1'"
+                ).fetchone()
+
+        self.assertEqual(decision, ("assigned", event_id, 1))
+
+    def test_exhausted_error_decision_cannot_be_reclassified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "fintick.db"
+            uri = "at://stream/terminal-error/1"
+            with open_database(db) as connection:
+                insert_post(connection, {
+                    "uri": uri,
+                    "cid": "cid-terminal-error-1",
+                    "record": {"text": "Market event", "createdAt": T0},
+                })
+                for attempt in range(3):
+                    set_post_aggregation_decision(
+                        connection,
+                        uri,
+                        "errored",
+                        reason=f"failed attempt {attempt + 1}",
+                        retry_group="terminal-error-group",
+                    )
+                with self.assertRaisesRegex(ValueError, "already terminal"):
+                    set_post_aggregation_decision(
+                        connection,
+                        uri,
+                        "ignored",
+                        reason="late duplicate worker",
+                    )
+                decision = connection.execute(
+                    "SELECT state, attempts FROM post_aggregation_decisions WHERE post_uri=?",
+                    (uri,),
+                ).fetchone()
+
+        self.assertEqual(decision, ("errored", 3))
 
     def test_event_key_is_stable_and_instrument_scoped(self) -> None:
         a = event_key(

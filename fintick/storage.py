@@ -14,6 +14,7 @@ from typing import Any
 from fintick.dedup import normalize_text, text_hash
 
 DEDUP_WINDOW = timedelta(minutes=60)
+POST_AGGREGATION_MAX_ATTEMPTS = 3
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
@@ -185,6 +186,68 @@ def _assert_event_signal_ownership(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_post_aggregation_decisions(connection: sqlite3.Connection) -> None:
+    """Apply additive v2.1 ledger columns to databases opened pre-release."""
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(post_aggregation_decisions)"
+        ).fetchall()
+    }
+    if "retry_group" not in columns:
+        connection.execute(
+            "ALTER TABLE post_aggregation_decisions ADD COLUMN retry_group TEXT"
+        )
+
+
+def _bootstrap_post_aggregation_decisions(connection: sqlite3.Connection) -> None:
+    """Account for pre-v2.1 posts without pretending old history was reviewed."""
+    rows = connection.execute(
+        """
+        SELECT p.uri, p.created_at, es.event_id
+        FROM posts p
+        LEFT JOIN event_signals es ON es.post_uri = p.uri
+        LEFT JOIN post_aggregation_decisions d ON d.post_uri = p.uri
+        WHERE d.post_uri IS NULL
+        ORDER BY p.created_at, p.uri
+        """
+    ).fetchall()
+    if not rows:
+        return
+
+    valid_times: list[datetime] = []
+    parsed_times: dict[str, datetime] = {}
+    for post_uri, created_at, _ in rows:
+        try:
+            parsed = _parse_timestamp(created_at)
+        except (TypeError, ValueError):
+            continue
+        parsed_times[post_uri] = parsed
+        valid_times.append(parsed)
+    cutoff = max(valid_times) - timedelta(hours=6) if valid_times else None
+    now = datetime.now(UTC).isoformat()
+
+    decisions: list[tuple[str, str, int | None, str | None, str]] = []
+    for post_uri, _, event_id in rows:
+        if event_id is not None:
+            state, reason = "assigned", None
+        elif post_uri not in parsed_times:
+            state, reason = "errored", "malformed legacy post timestamp"
+        elif cutoff is not None and parsed_times[post_uri] < cutoff:
+            state, reason = "out_of_scope", "predates v2.1 bootstrap window"
+        else:
+            state, reason = "pending", None
+        decisions.append((post_uri, state, event_id, reason, now))
+    connection.executemany(
+        """
+        INSERT INTO post_aggregation_decisions (
+            post_uri, state, event_id, reason, attempts, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?)
+        """,
+        decisions,
+    )
+
+
 @contextmanager
 def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
     """Open and initialize a FinTick database, committing on success."""
@@ -204,7 +267,9 @@ def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
         # them on next open, no ALTER or backfill.
         for statement in V2_SCHEMA:
             connection.execute(statement)
+        _migrate_post_aggregation_decisions(connection)
         _assert_event_signal_ownership(connection)
+        _bootstrap_post_aggregation_decisions(connection)
         yield connection
         connection.commit()
     except BaseException:
@@ -241,6 +306,15 @@ def insert_post(connection: sqlite3.Connection, post: dict[str, Any]) -> InsertR
         ),
     )
     inserted = cursor.rowcount == 1
+    if inserted:
+        connection.execute(
+            """
+            INSERT INTO post_aggregation_decisions (
+                post_uri, state, event_id, reason, attempts, updated_at
+            ) VALUES (?, 'pending', NULL, NULL, 0, ?)
+            """,
+            (post["uri"], now),
+        )
     deduplicated = _reconcile_hash(connection, digest) if inserted else 0
     return InsertResult(inserted=inserted, deduplicated=deduplicated)
 
@@ -334,6 +408,20 @@ V2_SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS event_validations_url_idx ON event_validations(url)",
+    """
+    CREATE TABLE IF NOT EXISTS post_aggregation_decisions (
+        post_uri TEXT PRIMARY KEY REFERENCES posts(uri) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'pending'
+            CHECK (state IN ('pending', 'assigned', 'ignored', 'errored', 'out_of_scope')),
+        event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+        reason TEXT,
+        retry_group TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS post_aggregation_decisions_state_idx "
+    "ON post_aggregation_decisions(state, updated_at)",
 )
 
 
@@ -380,6 +468,55 @@ class V2Event:
             last_seen_at=last_seen_at,
             signal_notes=signal_notes,
         )
+
+
+def set_post_aggregation_decision(
+    connection: sqlite3.Connection,
+    post_uri: str,
+    state: str,
+    *,
+    event_id: int | None = None,
+    reason: str | None = None,
+    retry_group: str | None = None,
+) -> None:
+    """Persist one auditable aggregation outcome for a stream post."""
+    if state not in {"assigned", "ignored", "errored"}:
+        raise ValueError(f"invalid terminal aggregation state: {state}")
+    if state == "assigned" and event_id is None:
+        raise ValueError("assigned post requires event_id")
+    if state != "assigned" and event_id is not None:
+        raise ValueError(f"{state} post cannot reference an event")
+    if state in {"ignored", "errored"} and (not isinstance(reason, str) or not reason.strip()):
+        raise ValueError(f"{state} post requires a reason")
+    if state == "errored" and (not isinstance(retry_group, str) or not retry_group):
+        raise ValueError("errored post requires retry_group")
+    if state != "errored":
+        retry_group = None
+    cursor = connection.execute(
+        """
+        UPDATE post_aggregation_decisions
+        SET state = ?, event_id = ?, reason = ?, retry_group = ?,
+            attempts = attempts + 1, updated_at = ?
+        WHERE post_uri = ?
+          AND (state = 'pending' OR (state = 'errored' AND attempts < ?))
+        """,
+        (state, event_id, reason.strip() if isinstance(reason, str) else None,
+         retry_group, datetime.now(UTC).isoformat(), post_uri,
+         POST_AGGREGATION_MAX_ATTEMPTS),
+    )
+    if cursor.rowcount == 1:
+        return
+    existing = connection.execute(
+        "SELECT state, event_id FROM post_aggregation_decisions WHERE post_uri = ?",
+        (post_uri,),
+    ).fetchone()
+    if existing is None:
+        raise ValueError(f"unknown post aggregation decision: {post_uri}")
+    if existing[0] == state and (state != "assigned" or existing[1] == event_id):
+        return
+    raise ValueError(
+        f"post aggregation decision already terminal: {post_uri} is {existing[0]}"
+    )
 
 
 def event_key(headline: str, primary_instrument: str | None = None) -> str:
@@ -580,6 +717,53 @@ def set_event_status(
             event_id,
         ),
     )
+
+
+def load_pipeline_health(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Return auditable post-accounting and backlog health."""
+    posts = int(connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0])
+    counts = {
+        str(state): int(count)
+        for state, count in connection.execute(
+            "SELECT state, COUNT(*) FROM post_aggregation_decisions GROUP BY state"
+        ).fetchall()
+    }
+    pending = counts.get("pending", 0)
+    retrying = int(connection.execute(
+        "SELECT COUNT(*) FROM post_aggregation_decisions "
+        "WHERE state='errored' AND attempts < ?",
+        (POST_AGGREGATION_MAX_ATTEMPTS,),
+    ).fetchone()[0])
+    terminal_errors = counts.get("errored", 0) - retrying
+    oldest_pending = connection.execute(
+        """
+        SELECT MIN(p.created_at)
+        FROM posts p
+        JOIN post_aggregation_decisions d ON d.post_uri = p.uri
+        WHERE d.state='pending' OR (d.state='errored' AND d.attempts < ?)
+        """,
+        (POST_AGGREGATION_MAX_ATTEMPTS,),
+    ).fetchone()[0]
+    latest_post = connection.execute("SELECT MAX(created_at) FROM posts").fetchone()[0]
+    latest_decision = connection.execute(
+        "SELECT MAX(updated_at) FROM post_aggregation_decisions "
+        "WHERE state IN ('assigned', 'ignored', 'errored')"
+    ).fetchone()[0]
+    accounted = sum(counts.get(state, 0) for state in (
+        "assigned", "ignored", "out_of_scope"
+    ))
+    return {
+        "posts": posts,
+        "accounted": accounted,
+        "backlog": pending + retrying,
+        "pending": pending,
+        "retrying": retrying,
+        "terminal_errors": terminal_errors,
+        "oldest_pending_at": oldest_pending,
+        "latest_post_at": latest_post,
+        "latest_decision_at": latest_decision,
+        "decisions": counts,
+    }
 
 
 def load_events(

@@ -2,16 +2,108 @@
 
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
+from unittest import mock
 
 from fintick.ingest import ingest_fixture
-from fintick.storage import V2Event, load_events, open_database, upsert_event
-from fintick.validate import validate_pending
+from fintick.storage import (
+    V2Event,
+    load_events,
+    open_database,
+    record_validation,
+    set_event_status,
+    upsert_event,
+)
+from fintick.validate import (
+    ValidationClaim,
+    _inferred_stance,
+    _source,
+    search_common_vision,
+    search_validation_news,
+    validate_pending,
+)
 
 FIXTURE = Path(__file__).parents[1] / "reference" / "nvda_repost_cluster.json"
 FIRST_SEEN = "2026-08-24T15:00:11+00:00"
+SAMPLE_PARTNER_CREDENTIAL = "partner-token"
+
+
+class CommonVisionProviderTests(unittest.TestCase):
+    def test_search_uses_bearer_token_and_excludes_social_posts(self) -> None:
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _limit):
+                return json.dumps({"data": [
+                    {
+                        "title": "US Consumer Confidence Falls on Jobs, Business Outlook",
+                        "url": "https://example.com/consumer-confidence",
+                        "published_at": "2026-08-25T14:25:56+00:00",
+                        "feed": {"name": "Example Wire"},
+                    },
+                    {
+                        "title": "A social post repeating the same claim",
+                        "url": "https://bsky.app/profile/example/post/123",
+                        "published_at": "2026-08-25T14:26:00+00:00",
+                        "feed": {"name": "Bluesky"},
+                    },
+                ]}).encode()
+
+        def opener(request, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+        stories = search_common_vision(
+            "US consumer confidence index falls to a seven month low in August",
+            5,
+            token=SAMPLE_PARTNER_CREDENTIAL,
+            opener=opener,
+        )
+
+        self.assertEqual(stories, [{
+            "url": "https://example.com/consumer-confidence",
+            "title": "US Consumer Confidence Falls on Jobs, Business Outlook",
+            "publisher": "Example Wire",
+            "published_at": "2026-08-25T14:25:56+00:00",
+        }])
+        request, timeout = requests[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer partner-token")
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+        self.assertEqual(query["search"], ["consumer confidence"])
+        self.assertEqual(query["per_page"], ["5"])
+        self.assertIn("from", query)
+        self.assertIn("to", query)
+        self.assertEqual(timeout, 20.0)
+
+    @mock.patch.dict(os.environ, {"FINTICK_COMMON_VISION_TOKEN": "partner-token"})
+    @mock.patch("fintick.validate.search_external_news")
+    @mock.patch("fintick.validate.search_common_vision")
+    def test_configured_token_selects_common_vision_without_direct_google_query(
+        self,
+        common_search,
+        google_search,
+    ) -> None:
+        expected = [{"url": "https://example.com/story", "title": "A story"}]
+        common_search.return_value = expected
+
+        result = search_validation_news("market claim", 5)
+
+        self.assertEqual(result, expected)
+        common_search.assert_called_once_with(
+            "market claim", 5, token=SAMPLE_PARTNER_CREDENTIAL
+        )
+        google_search.assert_not_called()
 
 
 class ValidatePipelineTests(unittest.TestCase):
@@ -97,6 +189,115 @@ class ValidatePipelineTests(unittest.TestCase):
         self.assertEqual((result.breaking, result.confirmed), (1, 0))
         self.assertEqual(event["status"], "breaking")
         self.assertEqual(event["validations"], [])
+
+    def test_generic_live_blog_overlap_does_not_corroborate_specific_claim(self) -> None:
+        claim = ValidationClaim(
+            event_id=27,
+            query="",
+            first_seen_at=FIRST_SEEN,
+            previous_status="breaking",
+            headline=(
+                "US Navy clears mines from Strait of Hormuz; Trump warns of zero "
+                "tolerance for new placements"
+            ),
+            facts_json=(
+                '[{"label":"Action","value":"All mines removed and/or detonated '
+                'from international waters of the Strait of Hormuz"},'
+                '{"label":"Policy","value":"Zero tolerance policy on mine placement"}]'
+            ),
+            instruments_json="[]",
+        )
+
+        stance = _inferred_stance(
+            "US removes Syria's designation as a State Sponsor of Terrorism; "
+            "al-Sharaa thanks Trump | LIVE BLOG",
+            claim,
+        )
+
+        self.assertIsNone(stance)
+
+    def test_revalidation_removes_historical_false_confirmation(self) -> None:
+        with open_database(self.database) as connection:
+            event_id = connection.execute("SELECT id FROM events").fetchone()[0]
+            record_validation(
+                connection,
+                event_id,
+                url="https://example.com/historical-false-positive",
+                title="Nvidia announces seven new products after shares fall",
+                publisher="Example Wire",
+                stance="corroborating",
+                published_at="2026-08-24T15:10:11+00:00",
+            )
+            set_event_status(connection, event_id, "confirmed", lead_seconds=600)
+
+        result = validate_pending(
+            self.database,
+            lookup=lambda _query, _limit: [],
+            min_age=0,
+        )
+        with open_database(self.database) as connection:
+            event = load_events(connection)[0]
+
+        self.assertEqual((result.selected, result.breaking), (1, 1))
+        self.assertEqual(event["status"], "breaking")
+        self.assertEqual(event["validations"], [])
+
+    def test_revalidation_removes_social_post_confirmation(self) -> None:
+        with open_database(self.database) as connection:
+            event_id = connection.execute("SELECT id FROM events").fetchone()[0]
+            record_validation(
+                connection,
+                event_id,
+                url="https://bsky.app/profile/example/post/123",
+                title="Nvidia falls for seventh day in longest slide since 2022",
+                publisher="Bluesky",
+                stance="corroborating",
+                published_at="2026-08-24T15:10:11+00:00",
+            )
+            set_event_status(connection, event_id, "confirmed", lead_seconds=600)
+
+        result = validate_pending(
+            self.database,
+            lookup=lambda _query, _limit: [],
+            min_age=0,
+        )
+        with open_database(self.database) as connection:
+            event = load_events(connection)[0]
+
+        self.assertEqual((result.selected, result.breaking), (1, 1))
+        self.assertEqual(event["status"], "breaking")
+        self.assertEqual(event["validations"], [])
+
+    def test_source_boundary_rejects_disguised_social_hosts(self) -> None:
+        claim = ValidationClaim(
+            event_id=27,
+            query="",
+            first_seen_at=FIRST_SEEN,
+            previous_status="breaking",
+            headline="Nvidia falls for seventh day in longest slide since 2022",
+            facts_json="[]",
+            instruments_json="[]",
+        )
+        for url in (
+            "https://bsky.app:443/profile/example/post/123",
+            "https://user@bsky.app/profile/example/post/123",
+            "https://bsky.app./profile/example/post/123",
+            "https://sub.bsky.app:443/profile/example/post/123",
+            "https://bsky%2eapp/profile/example/post/123",
+            "https://b%73ky.app/profile/example/post/123",
+            "https://bsky.app%2e/profile/example/post/123",
+            "https://bsky。app/profile/example/post/123",
+            "https://bsky．app/profile/example/post/123",
+            "https://bsky｡app/profile/example/post/123",
+            "https://bsky.app\\@example.com/profile/example/post/123",
+            "https://bsky.app%5c@example.com/profile/example/post/123",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(_source({
+                    "url": url,
+                    "title": "Nvidia falls for seventh day in longest slide since 2022",
+                    "publisher": "Bluesky",
+                }, claim))
 
     def test_matching_unlabeled_search_hit_confirms_event(self) -> None:
         result = validate_pending(

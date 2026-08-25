@@ -1,7 +1,7 @@
 [project]
 name = "fintick"
 version = "0.1.0"
-description = "A local-first financial intelligence tape powered by Bluesky and Qwen"
+description = "An accountable financial event-intelligence pipeline powered by Bluesky"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -9,6 +9,7 @@ authors = [{ name = "Michael Sitarzewski" }]
 
 [project.scripts]
 fintick = "fintick.cli:main"
+fintick-benchmark = "fintick.benchmark:main"
 
 [build-system]
 requires = ["setuptools>=77"]

@@ -22,6 +22,9 @@ venv/
 .env
 .env.*
 !.env.example
+/auth.json
+/.hermes/
+/.codex/
 
 # Editors / OS
 .DS_Store

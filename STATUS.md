@@ -1,19 +1,22 @@
-DONE
+V2.1 RELEASE CANDIDATE — LIVE SERVICE HANDOFF PENDING
 
-# FinTick — Build Status (v2: stream-signal + validation)
+# FinTick — Build Status (v2.1: accountable ingestion)
 
-FinTick v2 is complete: one stream becomes distinct events; each event carries structured facts and
-stream-signal counts; independent RSS/news validation produces breaking/confirmed/contradicted/developing
-status with lead time; and the responsive Edge Board makes uncorroborated events visually primary. The
-canonical four-post NVDA fixture reaches one breaking event with four signals, facts, unified NVDA, and
-zero external sources. All 80 tests pass; all four worker processes were launched and verified; desktop
-and mobile interfaces were rendered and inspected; the dashboard runs at http://127.0.0.1:8137.
+FinTick v2.1 is a verified release candidate: every new post enters a durable accounting ledger;
+aggregation drains oldest pending work through short IDs; every selected ID must become one event signal,
+an explicit ignore, or a visible bounded error; failed subsets retry together. GPT-5.6 Luna is reached
+through Hermes-managed OAuth, with the local provider retained. The Edge Board exposes backlog and error
+health. All 104 tests, compile checks, shell syntax, and diff checks pass. Luna scored 100% accounting on
+the fixed 28-post corpus. Copied-live catch-up reached zero backlog with isolated retries exercised.
+Copied-live validation repair reduced unsupported confirmations from 20 to 7 and retained only
+claim-aligned evidence. The live Supervisor workers remain unchanged until the rootless user-systemd
+handoff is approved.
 
 <!-- When ALL PRD.md §7 acceptance criteria pass, replace the line below with `DONE` + a
      one-paragraph summary, then run: hermes cron pause fintick-build -->
-STATUS: DONE
+STATUS: RELEASE CANDIDATE — DEPLOYMENT PENDING
 
-**Current milestone:** Complete — M1 through M6 accepted 2026-08-25.
+**Current milestone:** M7 — independent review, documentation, and service-manager handoff.
 
 ## The v2 pivot (read this first every fire)
 v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
@@ -26,8 +29,8 @@ validate; and an event with **0 external sources = `breaking`**, which is the po
 Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA posts must become
 **one** event, and offline must land as **`breaking`** (0 external sources).
 
-> ⚠️ **Supersedes AGENTS.md:** the v1 hard-rule "Dedup is mandatory" is **retired** for v2 — do NOT
-> hash-dedup. Aggregation (F2) is the merge mechanism. Ignore `reference/dedup_insight.md`.
+> The v1 hard-rule "Dedup is mandatory" is **retired** for v2 — do NOT hash-dedup. Aggregation (F2)
+> is the merge mechanism. `AGENTS.md` now reflects this accountable-ingestion contract.
 
 ## Milestones (tick as you finish; keep the tree runnable at every commit)
 - [x] **M1 — Schema.** Add `events`, `event_signals` (event↔stream post), `event_validations`
@@ -93,17 +96,56 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
   seconds. The six-hour window retains its explicit 200-post cap. Qwen aggregation disables reasoning
   and caps JSON output at 4096 tokens to avoid wasting the request timeout on hidden reasoning.
 
-## Build config (now enforced at the Hermes level)
-- **Local Qwen ONLY** — cloud `fallback_providers` is disabled; **do not** expect or rely on a
-  fallback. If the local model errors, mark the item errored and continue.
-- Aggregate uses a bounded, non-streaming JSON request. The 10-post default is sized to finish inside
-  the 300-second model timeout on the current 27B local runtime; callers may override it up to 200.
-- Everything else per AGENTS.md: offline-fixture-first, commit per milestone, no sudo (write the
-  supervisor script), no `git push`, DONE + pause when §7 all pass.
+## v2.1 accountable ingestion (2026-08-25)
+
+- Additive `post_aggregation_decisions` ledger: `pending`, `assigned`, `ignored`, `errored`, and
+  migration-only `out_of_scope`; the six-hour bootstrap boundary avoids pretending old history was reviewed.
+- Oldest-pending batches replace newest-N sampling. Short IDs remove URI-copy failures. The parser rejects
+  missing, duplicate, unknown, or multiply assigned IDs and requires explicit ignore reasons.
+- Provider failures and rejected posts retry at most three times. Durable retry groups preserve the exact
+  failed subset instead of mixing unrelated failures or fresh backlog.
+- Default provider is GPT-5.6 Luna through the existing Hermes `openai-codex` OAuth state. FinTick neither
+  reads nor stores credentials. The one-shot subprocess uses safe mode plus Hermes' valid empty toolset, so
+  untrusted stream text cannot invoke agent tools. Local Ollama remains dependency-injected for offline tests
+  and benchmarks.
+- Fixed benchmark rerun: Luna accounted for 28/28 posts in 47.2 seconds with no parser errors,
+  perfect expected-pair precision, and 0.6538 expected-pair recall (10 events, 2 explicit ignores,
+  42 facts). The result is contract-correct but more fragmented than the earlier sample. Installed
+  local MoE returned no decisions under the strict contract and remains non-production.
+- Operational copied-live smoke under a minimal service environment completed a 50-post Luna batch. A retry
+  defect found there was reproduced, fixed, and covered by tests.
+- Final copied-live catch-up accounted for all 1,006 posts: 283 assigned, 45 explicitly ignored, and 678
+  migration-scoped historical posts. Backlog, retrying, terminal errors, and duplicate signal owners all
+  reached zero. One failed 50-post Luna group retried successfully in isolation before fresh work resumed.
+- Confirmed events are now periodically revalidated. Historical source titles are reclassified through the
+  current conservative matcher and unrelated candidates are removed before status is recalculated. On a fresh
+  operational database copy with network lookup disabled, this repaired 20 historical confirmations to 7
+  claim-aligned confirmations, 3 developing events, and 24 breaking events; stored candidates fell from 73 to 18.
+- A bounded live-RSS smoke exposed one generic live-blog false positive (`US`, `Trump`, `removed`). A red
+  regression now requires claim-specific evidence spanning context and fact values; the rerun removed that row,
+  retained three on-claim Hormuz corroborations, and completed five validations with zero errors.
+- common.vision Partner API validation is selected when `FINTICK_COMMON_VISION_TOKEN` is configured; its
+  index already includes Google News feeds, so FinTick does not double-query direct Google RSS. Searches are
+  date-bounded and use broad two-anchor retrieval followed by the same conservative claim classifier. Social
+  URLs are excluded as independent sources. A copied-live five-event smoke completed with zero errors and did
+  not promote any weak candidates. The token lives outside the repository in a mode-0600 user environment file.
+- Independent adversarial review exposed and drove regressions for three accounting/evidence defects: exhausted
+  errors are now immutable, legacy-compatible model responses account for assigned and omitted posts, and the
+  final validation-source boundary removes social URLs during both fresh lookup and historical revalidation.
+  Social hosts are matched on normalized URL hostnames, including port, userinfo, subdomain, and trailing-dot
+  disguises.
+- `setup-fintick-services.sh` follows this host's established rootless user-systemd pattern. It replaces the
+  obsolete Supervisor installer but has not yet been activated while the old root-owned workers are running.
+- `AGENTS.md` now defines provider-injected inference, durable accounting, conservative revalidation, and
+  rootless user-systemd operations rather than preserving the historical local-Qwen/Supervisor build mandate.
+- Current verification: 104/104 tests, `compileall`, `bash -n`, and `git diff --check` pass.
 
 ## Notes / decisions
 - 2026-08-24: pivoted v1 → v2. Kept ingest + storage; replaced dedup/enrich/research with
   aggregate/facts/validate. Reframed "sources" = external validation only; stream = one origin.
 
 ## Blockers
-(none)
+
+- One-time operator handoff required after review: stop/remove the existing root-owned Supervisor FinTick
+  programs. Then install and verify the four rootless user-systemd units. No live source/database cutover
+  should occur before that controlled handoff.

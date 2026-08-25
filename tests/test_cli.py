@@ -51,21 +51,35 @@ class CliTests(unittest.TestCase):
             result = main(["aggregate", "--database", "/tmp/events.db", "--limit", "4"])
 
         self.assertEqual(result, 0)
-        aggregate_once.assert_called_once_with("/tmp/events.db", limit=4)
-        self.assertIn("aggregate selected=4 events=1 new=1 errored=0", output.getvalue())
+        aggregate_once.assert_called_once_with(
+            "/tmp/events.db", limit=4, provider="hermes",
+            model="gpt-5.6-luna", hermes_executable="hermes",
+        )
+        self.assertIn(
+            "aggregate selected=4 events=1 new=1 ignored=0 errored=0",
+            output.getvalue(),
+        )
 
     @mock.patch(
         "fintick.cli.aggregate_once",
-        return_value=AggregateStats(selected=10, events=5, created=5, errored=0),
+        return_value=AggregateStats(selected=50, events=5, created=5, ignored=30, errored=0),
     )
-    def test_aggregate_defaults_to_operational_batch_of_ten(
+    def test_aggregate_defaults_to_luna_backlog_batch(
         self, aggregate_once: mock.Mock
     ) -> None:
-        with contextlib.redirect_stdout(io.StringIO()):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
             result = main(["aggregate", "--database", "/tmp/events.db"])
 
         self.assertEqual(result, 0)
-        aggregate_once.assert_called_once_with("/tmp/events.db", limit=10)
+        aggregate_once.assert_called_once_with(
+            "/tmp/events.db",
+            limit=50,
+            provider="hermes",
+            model="gpt-5.6-luna",
+            hermes_executable="hermes",
+        )
+        self.assertIn("ignored=30", output.getvalue())
 
     @mock.patch(
         "fintick.cli.validate_pending",

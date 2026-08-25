@@ -68,6 +68,16 @@ class DashboardFeedTests(EventBoardFixture):
         self.assertNotIn("uri", event)
         self.assertNotIn("enrichment_status", event)
 
+    def test_feed_exposes_post_accounting_backlog(self) -> None:
+        pipeline = read_feed(self.database)["pipeline"]
+
+        self.assertEqual(pipeline["posts"], 4)
+        self.assertEqual(pipeline["accounted"], 0)
+        self.assertEqual(pipeline["backlog"], 4)
+        self.assertEqual(pipeline["pending"], 4)
+        self.assertEqual(pipeline["terminal_errors"], 0)
+        self.assertEqual(pipeline["oldest_pending_at"], "2026-08-24T15:00:11.000000+00:00")
+
     def test_breaking_events_sort_ahead_of_newer_confirmed_events(self) -> None:
         with open_database(self.database) as connection:
             confirmed_id, _ = upsert_event(connection, V2Event.from_key(
@@ -163,6 +173,10 @@ class DashboardHttpTests(EventBoardFixture):
         self.assertIn("prefers-reduced-motion", DASHBOARD_HTML)
         self.assertIn('aria-live="polite"', DASHBOARD_HTML)
         self.assertIn('role="status"', DASHBOARD_HTML)
+        self.assertIn('aria-label="Pipeline accounting"', DASHBOARD_HTML)
+        self.assertIn("CAUGHT UP", DASHBOARD_HTML)
+        self.assertIn("CATCHING UP", DASHBOARD_HTML)
+        self.assertIn("TERMINAL ERRORS", DASHBOARD_HTML)
         self.assertIn('href="#feed"', DASHBOARD_HTML)
 
 

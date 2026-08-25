@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
-from fintick.storage import load_events, open_database
+from fintick.storage import load_events, load_pipeline_health, open_database
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 250
@@ -51,6 +51,7 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
     limit = min(limit, MAX_LIMIT)
     with open_database(database) as connection:
         events = load_events(connection, limit=None)
+        pipeline = load_pipeline_health(connection)
     for event in events:
         event["validations"] = _safe_validations(event.get("validations"))
     events.sort(key=lambda event: (
@@ -69,6 +70,7 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "count": len(items),
+        "pipeline": pipeline,
         "items": items,
     }
 
@@ -93,7 +95,8 @@ body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% -10%,#25
 header{padding:24px clamp(18px,4vw,60px) 18px;border-bottom:1px solid var(--line)}
 .header-row{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.brand{display:flex;align-items:baseline;gap:15px}
 h1{margin:0;color:var(--amber);font-size:clamp(24px,3vw,34px);letter-spacing:-.07em}.brand span{font-size:10px;letter-spacing:.17em;text-transform:uppercase;color:var(--muted)}
-.connection{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;letter-spacing:.12em}.pulse{width:8px;height:8px;border-radius:50%;background:var(--confirmed);box-shadow:0 0 12px var(--confirmed)}.pulse.error{background:var(--breaking);box-shadow:0 0 12px var(--breaking)}
+.connection{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;letter-spacing:.12em}.pulse{width:8px;height:8px;border-radius:50%;background:var(--confirmed);box-shadow:0 0 12px var(--confirmed)}.pulse.catchup{background:var(--developing);box-shadow:0 0 12px var(--developing)}.pulse.error{background:var(--breaking);box-shadow:0 0 12px var(--breaking)}
+.pipeline-health{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:18px;padding:10px 12px;border:1px solid var(--line);background:rgba(0,0,0,.16);color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.pipeline-health b{color:var(--text);font-weight:650}.pipeline-health .good b{color:var(--confirmed)}.pipeline-health .warn b{color:var(--developing)}.pipeline-health .bad b{color:var(--breaking)}
 .metrics{display:flex;flex-wrap:wrap;gap:20px;margin-top:24px}.metric{min-width:108px}.metric b{display:block;font-size:22px;line-height:1.1}.metric span{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.13em}.metric.breaking b{color:var(--breaking)}
 .tape{overflow:hidden;border-bottom:1px solid var(--line);background:#0e110f;white-space:nowrap}.tape-track{display:inline-flex;min-width:max-content;animation:crawl var(--duration,50s) linear infinite}.tape:hover .tape-track{animation-play-state:paused}.tape-group{display:inline-flex}.tick{padding:11px 28px 11px 0;font-size:11px;color:var(--muted)}.tick::before{content:"◆";color:var(--line);margin:0 18px}.tick.breaking{color:var(--breaking)}.tick.confirmed{color:var(--confirmed)}
 @keyframes crawl{to{transform:translateX(-50%)}}
@@ -105,7 +108,7 @@ main{width:min(1320px,calc(100% - 32px));margin:0 auto;padding:38px 0 76px}.boar
 .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}.chip{padding:5px 8px;border:1px solid #384039;background:var(--lift);font-size:10px}.chip.up{color:var(--confirmed);border-color:#356347}.chip.down{color:var(--breaking);border-color:#6c403d}
 .sources{margin:18px 0 0;padding:15px 0 0;border-top:1px solid var(--line);list-style:none}.sources li+li{margin-top:9px}.sources a{color:var(--cyan);font-size:11px;line-height:1.45;text-decoration:underline;text-decoration-color:rgba(117,203,208,.35);text-underline-offset:3px}.sources a:focus-visible{outline:2px solid var(--amber);outline-offset:3px}.publisher{color:var(--muted);font-size:10px}.lag{margin-top:12px;color:var(--confirmed);font-size:10px}.empty{grid-column:1/-1;padding:90px 24px;border:1px dashed var(--line);color:var(--muted);text-align:center;line-height:1.8}.error-message{color:var(--breaking)}
 footer{padding:20px;border-top:1px solid var(--line);color:var(--dim);text-align:center;font-size:9px;letter-spacing:.1em}
-@media(max-width:640px){.header-row{align-items:flex-start}.board-head{align-items:flex-start;flex-direction:column;gap:10px}.brand{display:block}.brand span{display:block;margin-top:6px}.feed{grid-template-columns:1fr}.metrics{gap:14px}.metric{min-width:82px}}
+@media(max-width:640px){.header-row{align-items:flex-start}.board-head{align-items:flex-start;flex-direction:column;gap:10px}.brand{display:block}.brand span{display:block;margin-top:6px}.feed{grid-template-columns:1fr}.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.metric{min-width:0}}
 @media(prefers-reduced-motion:reduce){.tape-track{animation:none}}
 </style>
 </head>
@@ -113,6 +116,7 @@ footer{padding:20px;border-top:1px solid var(--line);color:var(--dim);text-align
 <a class="skip" href="#feed">Skip to event board</a>
 <header>
   <div class="header-row"><div class="brand"><h1>FinTick_</h1><span>ahead of the wire</span></div><div class="connection" role="status"><i class="pulse" id="pulse" aria-hidden="true"></i><span id="connection">CONNECTING</span></div></div>
+  <div class="pipeline-health" id="pipeline-health" aria-label="Pipeline accounting">Awaiting pipeline health…</div>
   <div class="metrics" id="metrics" aria-label="Event status summary"></div>
 </header>
 <section class="tape" aria-label="Latest event ticker"><div class="tape-track" id="tape"></div></section>
@@ -129,13 +133,14 @@ function relativeTime(value){const time=Date.parse(value);if(!Number.isFinite(ti
 function safeStatus(value){return['breaking','confirmed','contradicted','developing'].includes(value)?value:'developing'}
 function badgeText(item){const n=Array.isArray(item.validations)?item.validations.length:0;switch(safeStatus(item.status)){case'breaking':return'BREAKING — no corroboration yet';case'confirmed':return'CONFIRMED — '+n+' source'+(n===1?'':'s');case'contradicted':return'CONTRADICTED';default:return'DEVELOPING'}}
 function lagText(seconds){if(!Number.isFinite(seconds))return'';const abs=Math.abs(seconds),value=abs<3600?Math.round(abs/60)+' min':(abs/3600).toFixed(1)+' hr';return seconds>=0?'news +'+value+' after the stream':'news '+value+' before the stream'}
+function renderPipeline(value){const p=value&&typeof value==='object'?value:{},node=$('pipeline-health'),backlog=Number(p.backlog)||0,errors=Number(p.terminal_errors)||0,accounted=Number(p.accounted)||0,posts=Number(p.posts)||0;node.replaceChildren();let state='CAUGHT UP',tone='good';if(errors>0){state='TERMINAL ERRORS';tone='bad'}else if(backlog>0){state='CATCHING UP';tone='warn'}const status=element('span',tone);status.append(element('b','',state));node.append(status);const coverage=element('span','');coverage.append(document.createTextNode('accounted '),element('b','',accounted+' / '+posts));node.append(coverage);const queue=element('span',backlog?'warn':'good');queue.append(document.createTextNode('backlog '),element('b','',String(backlog)));node.append(queue);if(backlog&&p.oldest_pending_at){const oldest=element('span','');oldest.append(document.createTextNode('oldest '),element('b','',relativeTime(p.oldest_pending_at)));node.append(oldest)}if(errors){const terminal=element('span','bad');terminal.append(document.createTextNode('errors '),element('b','',String(errors)));node.append(terminal)}$('connection').textContent=state;$('pulse').classList.toggle('catchup',backlog>0&&!errors);$('pulse').classList.toggle('error',errors>0)}
 function renderMetrics(items){const metrics=$('metrics');metrics.replaceChildren();for(const [status,label] of [['breaking','breaking now'],['confirmed','confirmed'],['developing','developing'],['contradicted','contradicted']]){const box=element('div','metric '+status);box.append(element('b','',String(items.filter(x=>x.status===status).length)),element('span','',label));metrics.append(box)}}
 function renderTape(items){const tape=$('tape');tape.replaceChildren();if(!items.length){tape.append(element('span','tick','No events yet'));return}function group(hidden){const node=element('div','tape-group');if(hidden)node.setAttribute('aria-hidden','true');for(const item of items.slice(0,24))node.append(element('span','tick '+safeStatus(item.status),String(item.headline||'')));return node}tape.append(group(false),group(true));tape.style.setProperty('--duration',Math.max(38,items.length*8)+'s')}
 function renderCard(item){const status=safeStatus(item.status),card=element('article','card '+status);const meta=element('div','card-meta');meta.append(element('span','badge',badgeText(item)));if(Number.isInteger(item.importance)){const rank=element('span','importance');rank.setAttribute('aria-label','Importance '+item.importance+' of 5');rank.append(document.createTextNode('◆'.repeat(item.importance)),element('i','', '◆'.repeat(5-item.importance)));meta.append(rank)}card.append(meta,element('h3','headline',String(item.headline||'Untitled event')));if(item.summary)card.append(element('p','summary',String(item.summary)));const origin=element('p','origin');origin.append(document.createTextNode('via the stream · seen '),element('strong','',String(item.stream_seen||0)+'×'),document.createTextNode(' · '+relativeTime(item.first_seen_at)));card.append(origin);
 const facts=Array.isArray(item.facts)?item.facts:[];if(facts.length){const grid=element('div','facts');for(const fact of facts){if(!fact||fact.value===undefined)continue;const node=element('div','fact');node.append(element('b','',String(fact.value)+(fact.unit?' '+fact.unit:'')),element('span','',String(fact.label||'fact')));grid.append(node)}if(grid.childNodes.length)card.append(grid)}
 const instruments=Array.isArray(item.instruments)?item.instruments:[];if(instruments.length){const chips=element('div','chips');for(const instrument of instruments){const direction=['up','down','flat'].includes(instrument.direction)?instrument.direction:'flat';const marker=direction==='up'?'▲ ':direction==='down'?'▼ ':'— ';const chip=element('span','chip '+direction,marker+String(instrument.symbol||instrument.name||''));chip.title=String(instrument.name||instrument.symbol||'Instrument');chips.append(chip)}card.append(chips)}
 const links=Array.isArray(item.validations)?item.validations:[];if(links.length){const list=element('ul','sources');for(const story of links){if(!story||!story.url)continue;const li=element('li'),link=element('a','',String(story.title||story.url));link.href=String(story.url);link.target='_blank';link.rel='noopener noreferrer';li.append(link,document.createTextNode(' '),element('span','publisher','— '+String(story.publisher||'external news')));list.append(li)}if(list.childNodes.length)card.append(list)}const lag=lagText(item.lead_seconds);if(lag)card.append(element('p','lag',lag));return card}
-function render(data){const items=Array.isArray(data.items)?data.items:[],feed=$('feed');renderMetrics(items);renderTape(items);feed.replaceChildren();if(!items.length)feed.append(element('div','empty','No aggregated events yet. Ingest the stream, then run FinTick aggregate.'));else for(const item of items)feed.append(renderCard(item));const generated=new Date(data.generated_at);$('updated').textContent=Number.isNaN(generated.valueOf())?items.length+' events':items.length+' events · updated '+generated.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});$('connection').textContent='LIVE';$('pulse').classList.remove('error')}
+function render(data){const items=Array.isArray(data.items)?data.items:[],feed=$('feed');renderPipeline(data.pipeline);renderMetrics(items);renderTape(items);feed.replaceChildren();if(!items.length)feed.append(element('div','empty','No aggregated events yet. Ingest the stream, then run FinTick aggregate.'));else for(const item of items)feed.append(renderCard(item));const generated=new Date(data.generated_at);$('updated').textContent=Number.isNaN(generated.valueOf())?items.length+' events':items.length+' events · updated '+generated.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
 let refreshInFlight=false;async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const response=await fetch('/api/feed',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);render(await response.json())}catch(error){$('connection').textContent='RECONNECTING';$('pulse').classList.add('error');if(!$('feed').querySelector('.card'))$('feed').replaceChildren(element('div','empty error-message','Event feed unavailable. FinTick will retry automatically.'))}finally{refreshInFlight=false}}
 refresh(); setInterval(refresh, 20000);
 </script>

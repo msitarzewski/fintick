@@ -1,0 +1,41 @@
+{
+  "name": "fintick-burst-28-v1",
+  "cutoff": "2026-08-25T13:12:36.993332+00:00",
+  "posts": [
+    {"id":"p001","created_at":"2026-08-25T12:59:10.991753+00:00","text":"TWO EMPLOYEES OF RUSSIAN-CONTROLLED ZAPORIZHZHIA NUCLEAR PLANT INJURED IN UKRAINIAN ATTACK, RUSSIA SAYS"},
+    {"id":"p002","created_at":"2026-08-25T13:00:40.510869+00:00","text":"Effective Fed Funds Rate 3.63% August 24 vs 3.63% August 21."},
+    {"id":"p003","created_at":"2026-08-25T13:01:06.337551+00:00","text":"US HOUSE PRICE INDEX MOM ACTUAL 0% (FORECAST 0.2%, PREVIOUS 0.3%) $MACRO"},
+    {"id":"p004","created_at":"2026-08-25T13:01:08.881288+00:00","text":"US CASESHILLER 20 YOY ACTUAL 2.1% (FORECAST 1.8%, PREVIOUS 1.6%) $MACRO"},
+    {"id":"p005","created_at":"2026-08-25T13:01:12.433749+00:00","text":"APPLE INTRODUCES NEW MAC STUDIO WITH M5 MAX &amp; M5 ULTRA"},
+    {"id":"p006","created_at":"2026-08-25T13:01:16.185976+00:00","text":"US HOUSE PRICE INDEX YOY ACTUAL 2.3% (FORECAST -, PREVIOUS 2.2%) $MACRO"},
+    {"id":"p007","created_at":"2026-08-25T13:01:19.995602+00:00","text":"$AAPL - APPLE INTRODUCES M6 AND M5 ULTRA FOR A BIG LEAP IN PERFORMANCE AND AI COMPUTE APPLE - LAUNCHES FIRST 2 NM CHIP M6 AND QUAD-DIE M5 ULTRA"},
+    {"id":"p008","created_at":"2026-08-25T13:01:49.605974+00:00","text":"APPLE LAUNCHES NEW MAC MINI, FEATURING M6 &amp; M5 PRO"},
+    {"id":"p009","created_at":"2026-08-25T13:01:51.400497+00:00","text":"Apple introduces M6 &amp; M5 ultra."},
+    {"id":"p010","created_at":"2026-08-25T13:01:53.305588+00:00","text":"US FHFA HOUSE PRICE INDEX (M/M) JUNE: 0.0% (EST 0.2%; PREV 0.3%)"},
+    {"id":"p011","created_at":"2026-08-25T13:02:27.045441+00:00","text":"ECB settled €217.9 bln corporate bond purchases."},
+    {"id":"p012","created_at":"2026-08-25T13:02:37.959432+00:00","text":"ECB settled €1,669.4 bln public-sector bond purchases"},
+    {"id":"p013","created_at":"2026-08-25T13:02:42.754260+00:00","text":"ECB forex reserves rose eu900 mln to €349.3 bln"},
+    {"id":"p014","created_at":"2026-08-25T13:02:46.036787+00:00","text":"ECB bond holdings under PEPP €1.29 tln as of last week."},
+    {"id":"p015","created_at":"2026-08-25T13:03:11.552455+00:00","text":"US Case-Shiller 20 June Report"},
+    {"id":"p016","created_at":"2026-08-25T13:05:31.990573+00:00","text":"YZi Labs invested $12M across 24 startups in EASY Residency Season 4, with each company receiving $500K. The cohort focuses on stablecoin payments, on-chain FX, credit, market infrastructure, privacy and AI-native execution."},
+    {"id":"p017","created_at":"2026-08-25T13:05:32.866443+00:00","text":"US centcom: 'A U.S. Air Force F-16 fighter jet flies over the Middle East during a patrol'"},
+    {"id":"p018","created_at":"2026-08-25T13:06:04.963388+00:00","text":"APPLE: LEASE MAC STUDIO WITH M5 MAX FROM $48.99/MO, M5 ULTRA FROM $110.10/MO FOR 36 MONTHS || MAC STUDIO WITH M5 ULTRA STARTS AT $5,499 $5,099 FOR EDUCATION"},
+    {"id":"p019","created_at":"2026-08-25T13:06:05.829410+00:00","text":"APPLE: MAC STUDIO WITH M5 MAX STARTS AT $2,499 $2,299 FOR EDUCATION"},
+    {"id":"p020","created_at":"2026-08-25T13:09:14.218229+00:00","text":"U.S. JUDGE REJECTS GHISLAINE MAXWELL'S RENEWED BID TO THROW OUT CONVICTION, 20-YEAR PRISON SENTENCE FOR AIDING JEFFREY EPSTEIN'S SEXUAL ABUSE"},
+    {"id":"p021","created_at":"2026-08-25T13:10:04.034070+00:00","text":"Apple Unveils Mac Mini Featuring M6, M5 Pro $AAPL"},
+    {"id":"p022","created_at":"2026-08-25T13:10:29.770460+00:00","text":"PAKISTAN'S MUNIR SOUGHT TO OPEN SPACE FOR IRAN-US TALKS: TASNIM"},
+    {"id":"p023","created_at":"2026-08-25T13:10:30.787335+00:00","text":"Pakistan's Munir sought to open space for Iran-US talks - Tasnim."},
+    {"id":"p024","created_at":"2026-08-25T13:11:06.532248+00:00","text":"LayerZero $ZRO plans to launch ATLAS this fall, an institution-only onchain trading venue built on Zero. It will open with crypto spot and perpetuals, then expand to prediction contracts, futures and options. No consumer app is planned."},
+    {"id":"p025","created_at":"2026-08-25T13:11:14.621862+00:00","text":"IRANIAN NEGOTIATING TEAM: US MUST RETURN TO ISLAMABAD DEAL TO SECURE HORMUZ - TASNIM"},
+    {"id":"p026","created_at":"2026-08-25T13:11:16.963551+00:00","text":"PAKISTAN TO CONVEY IRAN'S CONDITIONS, POSITIONS TO US: TASNIM"},
+    {"id":"p027","created_at":"2026-08-25T13:11:42.648129+00:00","text":"Pakistan to convey Iran's condition &amp; positions to the US - Tasnim"},
+    {"id":"p028","created_at":"2026-08-25T13:12:36.993332+00:00","text":"Iran's conditions include return to MOU includiing on Hormuz -Tasnim"}
+  ],
+  "expected_clusters": [
+    ["p001"], ["p002"], ["p003","p004","p006","p010","p015"],
+    ["p005","p007","p008","p009","p018","p019","p021"],
+    ["p011","p012","p013","p014"], ["p016"],
+    ["p022","p023","p025","p026","p027","p028"], ["p024"]
+  ],
+  "expected_ignored": ["p017", "p020"]
+}

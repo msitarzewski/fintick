@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -20,6 +21,10 @@ from typing import Any
 from fintick.storage import open_database, record_validation, set_event_status
 
 NEWS_RSS_ENDPOINT = "https://news.google.com/rss/search"
+COMMON_VISION_ENDPOINT = "https://common.vision/api/v1/articles"
+SOCIAL_VALIDATION_HOSTS = {
+    "bsky.app", "facebook.com", "instagram.com", "threads.net", "twitter.com", "x.com",
+}
 STANCES = {"corroborating", "disputing", "partial"}
 NUMBER_WORDS = {
     "one": "1", "first": "1", "two": "2", "second": "2", "three": "3", "third": "3",
@@ -32,6 +37,70 @@ STOP_WORDS = {
     "its", "of", "on", "or", "the", "to", "with", "since",
 }
 DISPUTE_WORDS = {"deny", "denies", "denied", "dispute", "disputes", "false", "incorrect", "not"}
+WEAK_EVIDENCE_WORDS = {
+    "action", "announce", "new", "policy", "report", "say", "state", "trump", "us", "warn",
+    "remov",
+}
+COMMON_VISION_SEARCH_NOISE = {
+    "announced", "announces", "begins", "clears", "falls", "fell", "launches", "plans",
+    "reports", "rises", "rose", "says", "seeks", "starts", "trump", "unveils", "us", "warns",
+}
+HOST_DOT_EQUIVALENTS = str.maketrans({"。": ".", "．": ".", "｡": "."})
+
+
+def _normalized_validation_host(host: str) -> str:
+    normalized = host
+    for _ in range(4):
+        decoded = urllib.parse.unquote(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+    normalized = normalized.translate(HOST_DOT_EQUIVALENTS)
+    try:
+        normalized = normalized.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+    normalized = normalized.lower().rstrip(".").removeprefix("www.")
+    if (
+        not normalized
+        or not re.fullmatch(r"[a-z0-9.-]+", normalized)
+        or ".." in normalized
+        or normalized.startswith(".")
+    ):
+        return ""
+    return normalized
+
+
+def _is_social_validation_host(host: str) -> bool:
+    normalized = _normalized_validation_host(host)
+    return any(
+        normalized == social or normalized.endswith(f".{social}")
+        for social in SOCIAL_VALIDATION_HOSTS
+    )
+
+
+def _validation_url(url: str) -> tuple[urllib.parse.ParseResult, str] | None:
+    raw_url = url.strip()
+    decoded_url = raw_url
+    for _ in range(4):
+        decoded = urllib.parse.unquote(decoded_url)
+        if decoded == decoded_url:
+            break
+        decoded_url = decoded
+    if "\\" in decoded_url:
+        return None
+    parsed = urllib.parse.urlparse(raw_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    host = _normalized_validation_host(parsed.hostname or "")
+    if not host:
+        return None
+    return parsed, host
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +196,100 @@ def search_external_news(
     return parse_validation_rss(payload, limit=limit)
 
 
+def search_common_vision(
+    query: str,
+    limit: int = 5,
+    *,
+    token: str,
+    timeout: float = 20.0,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    sleep: Callable[[float], Any] = time.sleep,
+) -> list[dict[str, str]]:
+    """Search the authenticated common.vision partner index for news candidates."""
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("common.vision partner token is required")
+    if limit < 1 or limit > 100:
+        raise ValueError("common.vision limit must be between 1 and 100")
+    search_terms = [
+        token
+        for token in re.findall(r"[A-Za-z0-9]+", query)
+        if token.lower() not in STOP_WORDS | COMMON_VISION_SEARCH_NOISE
+    ]
+    compact_query = " ".join(search_terms[:2]) or query.strip()
+    today = datetime.now(UTC).date()
+    params = urllib.parse.urlencode({
+        "search": compact_query,
+        "from": (today - timedelta(days=7)).isoformat(),
+        "to": today.isoformat(),
+        "per_page": limit,
+    })
+    request = urllib.request.Request(
+        f"{COMMON_VISION_ENDPOINT}?{params}",
+        headers={
+            "Authorization": f"Bearer {token.strip()}",
+            "Accept": "application/json",
+            "User-Agent": "FinTick/0.2 (common.vision partner validation)",
+        },
+    )
+    payload = b""
+    for attempt in range(2):
+        try:
+            with opener(request, timeout=timeout) as response:
+                payload = response.read(2_000_000)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code == 429 and attempt == 0:
+                try:
+                    delay = float(error.headers.get("Retry-After", "5"))
+                except (TypeError, ValueError):
+                    delay = 5.0
+                sleep(min(60.0, max(1.0, delay)))
+                continue
+            raise RuntimeError(f"common.vision search failed: HTTP {error.code}") from error
+        except (OSError, urllib.error.URLError) as error:
+            raise RuntimeError(f"common.vision search failed: {type(error).__name__}") from error
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("common.vision search returned malformed JSON") from error
+    items = document.get("data") if isinstance(document, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError("common.vision search response requires a data array")
+    stories: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title, url = item.get("title"), item.get("url")
+        if not isinstance(title, str) or not title.strip() or not isinstance(url, str):
+            continue
+        validated_url = _validation_url(url)
+        if validated_url is None:
+            continue
+        _parsed, host = validated_url
+        if _is_social_validation_host(host):
+            continue
+        feed = item.get("feed")
+        publisher = feed.get("name") if isinstance(feed, dict) else None
+        story = {
+            "url": url.strip(),
+            "title": title.strip(),
+            "publisher": publisher.strip() if isinstance(publisher, str) and publisher.strip() else host,
+        }
+        published_at = item.get("published_at")
+        if isinstance(published_at, str) and published_at.strip():
+            story["published_at"] = published_at.strip()
+        stories.append(story)
+    return stories
+
+
+def search_validation_news(query: str, limit: int = 5) -> list[dict[str, str]]:
+    """Use the partner index when configured; retain direct RSS for local compatibility."""
+    token = os.environ.get("FINTICK_COMMON_VISION_TOKEN", "").strip()
+    if token:
+        return search_common_vision(query, limit, token=token)
+    return search_external_news(query, limit)
+
+
 def _json_list(value: str) -> list[Any]:
     try:
         parsed = json.loads(value)
@@ -164,8 +327,7 @@ def _claim_events(
             """
             SELECT id, headline, summary, facts_json, instruments_json, first_seen_at, status
             FROM events
-            WHERE status != 'confirmed'
-              AND (validated_at IS NULL OR julianday(validated_at) <= julianday(?))
+            WHERE validated_at IS NULL OR julianday(validated_at) <= julianday(?)
             ORDER BY importance DESC, first_seen_at DESC, id DESC
             LIMIT ?
             """,
@@ -244,12 +406,15 @@ def _inferred_stance(title: str, claim: ValidationClaim) -> str | None:
     context_tokens = _tokens(f"{claim.headline} {fact_labels}") - entity_tokens - value_tokens
     context_matches = title_tokens.intersection(context_tokens)
     value_matches = title_tokens.intersection(value_tokens)
+    specific_context = context_matches - WEAK_EVIDENCE_WORDS
+    specific_values = value_matches - WEAK_EVIDENCE_WORDS
+    specific_matches = specific_context | specific_values
     dispute = bool(title_tokens.intersection({_stem(word) for word in DISPUTE_WORDS}))
-    if dispute and value_matches and context_matches:
+    if dispute and specific_values and specific_context:
         return "disputing"
-    if value_matches and len(context_matches) >= 2:
+    if specific_values and specific_context and len(specific_matches) >= 3:
         return "corroborating"
-    if len(context_matches) >= 2:
+    if len(specific_context) >= 2:
         return "partial"
     return None
 
@@ -272,8 +437,11 @@ def _source(item: Any, claim: ValidationClaim) -> dict[str, str | None] | None:
     url, title = item.get("url"), item.get("title")
     if not isinstance(url, str) or not isinstance(title, str):
         return None
-    parsed = urllib.parse.urlparse(url.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not title.strip():
+    validated_url = _validation_url(url)
+    if validated_url is None or not title.strip():
+        return None
+    _parsed, host = validated_url
+    if _is_social_validation_host(host):
         return None
     explicit_stance = item.get("stance")
     if explicit_stance is None:
@@ -289,7 +457,7 @@ def _source(item: Any, claim: ValidationClaim) -> dict[str, str | None] | None:
     return {
         "url": url.strip(),
         "title": title.strip(),
-        "publisher": publisher.strip() if isinstance(publisher, str) else parsed.netloc,
+        "publisher": publisher.strip() if isinstance(publisher, str) else host,
         "stance": stance,
         "published_at": published_at,
     }
@@ -306,12 +474,51 @@ def _lead_seconds(first_seen_at: str, published_at: str | None) -> int | None:
     return int((published - first).total_seconds())
 
 
+def _repair_stored_sources(
+    connection: sqlite3.Connection,
+    claim: ValidationClaim,
+) -> None:
+    """Reclassify historical candidates and remove title-level false positives."""
+    rows = connection.execute(
+        """
+        SELECT url, title, publisher, published_at
+        FROM event_validations
+        WHERE event_id = ?
+        """,
+        (claim.event_id,),
+    ).fetchall()
+    for url, title, publisher, published_at in rows:
+        source = _source({
+            "url": url,
+            "title": title,
+            "publisher": publisher,
+            "published_at": published_at,
+        }, claim)
+        if source is None:
+            connection.execute(
+                "DELETE FROM event_validations WHERE event_id = ? AND url = ?",
+                (claim.event_id, url),
+            )
+            continue
+        connection.execute(
+            """
+            UPDATE event_validations
+            SET title = ?, publisher = ?, stance = ?, published_at = ?
+            WHERE event_id = ? AND url = ?
+            """,
+            (
+                source["title"], source["publisher"], source["stance"],
+                source["published_at"], claim.event_id, url,
+            ),
+        )
+
+
 def validate_pending(
     database: str | Path,
     *,
     limit: int = 5,
     min_age: float = 900,
-    lookup: Callable[[str, int], list[dict[str, str]]] = search_external_news,
+    lookup: Callable[[str, int], list[dict[str, str]]] = search_validation_news,
 ) -> ValidateStats:
     """Re-hunt eligible events; no sources is a successful breaking result."""
     claims = _claim_events(database, limit=limit, min_age=min_age)
@@ -324,6 +531,7 @@ def validate_pending(
                 if (source := _source(item, claim))
             ]
             with open_database(database) as connection:
+                _repair_stored_sources(connection, claim)
                 for source in sources:
                     record_validation(
                         connection,

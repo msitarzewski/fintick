@@ -1,7 +1,7 @@
 # FinTick — Product Requirements Document (v2: stream-signal + validation)
 
-> **Designed by Claude Opus 4.8 · Built by Qwen 3.8 27B via Hermes — local model ONLY.**
-> This document is the specification. You (the Hermes agent on local Qwen 3.8 27B) are the builder.
+> **Designed by Claude Opus 4.8 · Built by Qwen 3.8 27B via Hermes.**
+> This document is the product specification; provider and operations rules live in `AGENTS.md`.
 > Read `AGENTS.md` for how to work; read `reference/` for the facts you need.
 >
 > **This is v2.** v1 (a per-post ticker with hash-dedup + per-post enrich) is tagged `v1-baseline`
@@ -62,9 +62,10 @@ resilient: a bad/unparseable model response never crashes the pipeline or blocks
 `$NVDA · 7th consecutive down day · −3.2% · longest streak since 2022`. May be produced as part of
 the F2 call or a second pass. Store as structured data on the event.
 
-**F4 — Hunt for external validation (THE CORE STAGE).** For each event, search **independent news**
-(free RSS / news-search JSON via `curl` from the `terminal` tool — NO browser, see AGENTS.md) for
-stories corroborating the facts. Attach `validating_sources[]` `{url, title, publisher, stance,
+**F4 — Hunt for external validation (THE CORE STAGE).** For each event, search **independent news**.
+When configured, use the authenticated common.vision Partner API index, which includes Google News
+feeds; retain direct public RSS as the no-token compatibility path. Social posts are not independent
+corroboration. Attach `validating_sources[]` `{url, title, publisher, stance,
 published_at}`. Set `status`:
 - **`breaking`** — a real event with **0 external validating sources found** → *the stream is ahead
   of the news.* This is a first-class, highlighted result, NOT a failure.
@@ -84,19 +85,20 @@ aesthetic:
 - Auto-refresh ~15–30 s. Degrades gracefully: a fresh event shows immediately as `breaking` and
   gains a badge as validation completes.
 
-**F6 — Run as a process (24/7, KEEP from v1).** Runs continuously, survives reboots. You have **no
-sudo**: (re)write `setup-fintick-supervisor.sh` (author-script style, `user=michael`) for Michael to
-run — one program per long-running worker (ingest, aggregate, validate, dashboard). **Use a safe
+**F6 — Run as a process (24/7, KEEP from v1).** Runs continuously and survives reboots using the
+host's established rootless user-systemd convention. `setup-fintick-services.sh` installs one unit
+per long-running worker (ingest, aggregate, validate, dashboard). **Use a safe
 port for the dashboard — NOT 8080** (reserved/unsafe on this host); pick e.g. 8137 and make it
-configurable. Self-test by launching the workers yourself with `setsid`/`nohup`.
+configurable. Self-test with installer dry-run, user-systemd status, journal output, and loopback HTTP health.
 
 ## 5. Non-functional requirements
 
-- **All-local inference.** Aggregation + fact extraction run on local Qwen only
-  (`http://localhost:11434`, `qwen3.8:27b`). **No cloud AI** — the fallback is disabled at the
-  Hermes level; if the local model errors, mark the item errored and move on, never defect.
-- **No paid data APIs.** Free public Bluesky stream + free news/RSS for validation only.
-- **Dependency-light**, stdlib-first (Python 3.14 — see AGENTS.md). Resilient, idempotent, observable
+- **Provider-injected inference.** Aggregation defaults to GPT-5.6 Luna through Hermes-managed
+  `openai-codex` OAuth; FinTick never reads or copies credentials. The Ollama-compatible local route
+  remains injectable and offline-testable. Provider failures create durable retry/error decisions.
+- **No paid data dependency.** Public Bluesky plus the common.vision Partner API; direct free RSS
+  remains available when no partner token is configured.
+- **Dependency-light**, stdlib-first (Python 3.11+ — see AGENTS.md). Resilient, idempotent, observable
   (log per cycle: fetched / new / events / facts / validated / breaking / errored).
 
 ## 6. Architecture (refactor v1, don't rewrite)
@@ -123,8 +125,8 @@ New schema alongside the existing `posts` table: `events`, `event_signals` (even
 5. **Dashboard:** renders **event** cards with the validation badge front-and-center, breaking events
    highlighted/sorted up, origin shown as "via the stream · seen N×" and **never** as "N sources".
    Auto-refreshes. **The v1 doubled-headline render bug is fixed.**
-6. **Run-as-process:** ingest/aggregate/validate/dashboard run as long-lived workers under the user;
-   `setup-fintick-supervisor.sh` exists, correct, and uses a **non-8080** dashboard port.
+6. **Run-as-process:** ingest/aggregate/validate/dashboard run as long-lived rootless user services;
+   `setup-fintick-services.sh` exists, is portable, and uses a **non-8080** dashboard port.
 7. **Clean repo:** builds on `v1-baseline`; `README.md` updated for v2 (carrying the provenance
    line), `.gitignore` still excludes `data/`/DBs/caches; milestone commits; no DB/secrets committed.
    Do **not** `git push`.

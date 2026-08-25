@@ -10,7 +10,15 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-from fintick.aggregate import _load_window, aggregate_once, call_local_model, parse_aggregation
+from fintick.aggregate import (
+    _load_pending,
+    _load_window,
+    aggregate_once,
+    call_hermes_model,
+    call_local_model,
+    parse_accounted_aggregation,
+    parse_aggregation,
+)
 from fintick.ingest import ingest_fixture
 from fintick.storage import V2Event, insert_post, load_events, open_database, upsert_event
 
@@ -46,7 +54,28 @@ def _event(**overrides: object) -> dict[str, object]:
     return event
 
 
-class LocalModelRequestTests(unittest.TestCase):
+class HermesModelCallTests(unittest.TestCase):
+    def test_luna_uses_hermes_oauth_without_shell_or_repo_credentials(self) -> None:
+        completed = mock.Mock(returncode=0, stdout='{"events":[],"ignored_posts":[]}\n')
+        with mock.patch("fintick.aggregate.subprocess.run", return_value=completed) as run:
+            result = call_hermes_model("model prompt", executable="/usr/bin/hermes")
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "/usr/bin/hermes")
+        self.assertIn("openai-codex", argv)
+        self.assertIn("gpt-5.6-luna", argv)
+        self.assertIn("none", argv)
+        self.assertIn("-t", argv)
+        self.assertEqual(argv[argv.index("-t") + 1], "context_engine")
+        self.assertEqual(argv[-2], "-z")
+        self.assertTrue(argv[-1].endswith("model prompt"))
+        self.assertIn("post_ids", argv[-1])
+        self.assertIn("ignored_posts", argv[-1])
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertEqual(result, '{"events":[],"ignored_posts":[]}')
+
+
+class LocalModelCallTests(unittest.TestCase):
     @mock.patch("fintick.aggregate.urllib.request.urlopen")
     def test_disables_reasoning_and_bounds_json_output(self, urlopen: mock.Mock) -> None:
         urlopen.return_value = BytesIO(json.dumps({
@@ -60,6 +89,90 @@ class LocalModelRequestTests(unittest.TestCase):
         self.assertEqual(content, '{"events":[]}')
         self.assertIs(payload["think"], False)
         self.assertLessEqual(payload["options"]["num_predict"], 4096)
+
+
+class AccountedAggregationTests(unittest.TestCase):
+    def test_short_ids_map_to_uris_and_every_post_gets_a_decision(self) -> None:
+        posts = {
+            f"p{index:03d}": {
+                "uri": uri,
+                "created_at": f"2026-08-24T15:0{index}:00+00:00",
+                "text": f"post {index}",
+            }
+            for index, uri in enumerate(URIS, 1)
+        }
+        event = _event()
+        event.pop("stream_post_uris")
+        event["post_ids"] = ["p001", "p002"]
+        parsed = parse_accounted_aggregation(
+            json.dumps({
+                "events": [event],
+                "ignored_posts": [{"id": "p003", "reason": "non-event fragment"}],
+            }),
+            posts=posts,
+        )
+
+        self.assertEqual(parsed.events[0].post_uris, URIS[:2])
+        self.assertEqual(parsed.ignored, ((URIS[2], "non-event fragment"),))
+        self.assertEqual(parsed.errored_uris, (URIS[3],))
+        self.assertEqual(parsed.errored, 1)
+
+    def test_duplicate_short_id_inside_event_is_rejected(self) -> None:
+        posts = {
+            f"p{index:03d}": {
+                "uri": uri,
+                "created_at": f"2026-08-24T15:0{index}:00+00:00",
+                "text": f"post {index}",
+            }
+            for index, uri in enumerate(URIS, 1)
+        }
+        event = _event()
+        event.pop("stream_post_uris")
+        event["post_ids"] = ["p001", "p001"]
+        parsed = parse_accounted_aggregation(
+            json.dumps({
+                "events": [event],
+                "ignored_posts": [
+                    {"id": post_id, "reason": "fixture"}
+                    for post_id in ("p002", "p003", "p004")
+                ],
+            }),
+            posts=posts,
+        )
+
+        self.assertEqual(parsed.events, ())
+        self.assertIn(URIS[0], parsed.errored_uris)
+        self.assertGreaterEqual(parsed.errored, 1)
+
+    def test_rejected_event_counts_affected_posts_not_parser_steps(self) -> None:
+        posts = {
+            "p001": {
+                "uri": "at://stream/short/1",
+                "created_at": "2026-08-24T15:00:11+00:00",
+                "text": "Futures extend gains",
+            },
+            "p002": {
+                "uri": "at://stream/short/2",
+                "created_at": "2026-08-24T15:00:12+00:00",
+                "text": "Unrelated rhetoric",
+            },
+        }
+        response = json.dumps({
+            "events": [{
+                "canonical_headline": "Futures extend gains",
+                "summary": "Futures moved higher.",
+                "importance": 2,
+                "instruments": [],
+                "facts": [],
+                "post_ids": ["p001"],
+            }],
+            "ignored_posts": [{"id": "p002", "reason": "non-financial rhetoric"}],
+        })
+
+        parsed = parse_accounted_aggregation(response, posts=posts)
+
+        self.assertEqual(parsed.errored_uris, ("at://stream/short/1",))
+        self.assertEqual(parsed.errored, 1)
 
 
 class ParseAggregationTests(unittest.TestCase):
@@ -118,6 +231,77 @@ class ParseAggregationTests(unittest.TestCase):
 
 
 class AggregatePipelineTests(unittest.TestCase):
+    def test_accounted_batch_persists_assignments_and_ignores_then_does_not_repeat(self) -> None:
+        fixture = Path(__file__).parents[1] / "reference" / "nvda_repost_cluster.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "fintick.db"
+            ingest_fixture(fixture, database)
+            prompts: list[list[dict[str, str]]] = []
+
+            def model(prompt: str) -> str:
+                rows = json.loads(prompt)
+                prompts.append(rows)
+                event = _event()
+                event.pop("stream_post_uris")
+                event["post_ids"] = [rows[0]["id"], rows[1]["id"]]
+                return json.dumps({
+                    "events": [event],
+                    "ignored_posts": [
+                        {"id": rows[2]["id"], "reason": "duplicate fragment"},
+                        {"id": rows[3]["id"], "reason": "non-event fragment"},
+                    ],
+                })
+
+            first = aggregate_once(database, call_model=model)
+            second = aggregate_once(database, call_model=model)
+            with open_database(database) as connection:
+                decisions = connection.execute(
+                    "SELECT state, COUNT(*) FROM post_aggregation_decisions "
+                    "GROUP BY state ORDER BY state"
+                ).fetchall()
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(set(prompts[0][0]), {"id", "created_at", "text"})
+        self.assertNotIn("uri", prompts[0][0])
+        self.assertEqual((first.events, first.created, first.ignored, first.errored), (1, 1, 2, 0))
+        self.assertEqual(second.selected, 0)
+        self.assertEqual(decisions, [("assigned", 2), ("ignored", 2)])
+
+    def test_transient_batch_failure_retries_errored_posts_until_accounted(self) -> None:
+        fixture = Path(__file__).parents[1] / "reference" / "nvda_repost_cluster.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "fintick.db"
+            ingest_fixture(fixture, database)
+            calls = 0
+
+            def model(prompt: str) -> str:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("temporary provider failure")
+                rows = json.loads(prompt)
+                return json.dumps({
+                    "events": [],
+                    "ignored_posts": [
+                        {"id": row["id"], "reason": "fixture retry"} for row in rows
+                    ],
+                })
+
+            first = aggregate_once(database, call_model=model)
+            second = aggregate_once(database, call_model=model)
+            third = aggregate_once(database, call_model=model)
+            with open_database(database) as connection:
+                decisions = connection.execute(
+                    "SELECT state, attempts, COUNT(*) FROM post_aggregation_decisions "
+                    "GROUP BY state, attempts"
+                ).fetchall()
+
+        self.assertEqual(first.errored, 4)
+        self.assertEqual((second.selected, second.ignored), (4, 4))
+        self.assertEqual(third.selected, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(decisions, [("ignored", 2, 4)])
+
     def test_nvda_fixture_becomes_one_event_in_one_model_call(self) -> None:
         fixture = Path(__file__).parents[1] / "reference" / "nvda_repost_cluster.json"
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,15 +325,48 @@ class AggregatePipelineTests(unittest.TestCase):
             with open_database(database) as connection:
                 events = load_events(connection)
 
-        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(prompts), 1)
         self.assertEqual((first.selected, first.events, first.created, first.errored), (4, 1, 1, 0))
-        self.assertEqual((second.events, second.created), (1, 0))
+        self.assertEqual((second.selected, second.events, second.created), (0, 0, 0))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["stream_seen"], 4)
         self.assertEqual(events[0]["instruments"][0]["symbol"], "NVDA")
         prompt_rows = json.loads(prompts[0])
         self.assertEqual(len(prompt_rows), 4)
-        self.assertEqual(set(prompt_rows[0]), {"uri", "created_at", "text"})
+        self.assertEqual(set(prompt_rows[0]), {"id", "created_at", "text"})
+        self.assertNotIn("uri", prompt_rows[0])
+
+    def test_legacy_response_assigns_event_posts_and_errors_omissions(self) -> None:
+        fixture = Path(__file__).parents[1] / "reference" / "nvda_repost_cluster.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "fintick.db"
+            ingest_fixture(fixture, database)
+            with sqlite3.connect(database) as connection:
+                fixture_uris = tuple(
+                    row[0] for row in connection.execute(
+                        "SELECT uri FROM posts ORDER BY created_at"
+                    )
+                )
+            response = json.dumps({
+                "events": [_event(stream_post_uris=list(fixture_uris[:2]))]
+            })
+
+            stats = aggregate_once(database, call_model=lambda _: response)
+            with open_database(database) as connection:
+                decisions = connection.execute(
+                    "SELECT post_uri, state FROM post_aggregation_decisions ORDER BY post_uri"
+                ).fetchall()
+
+        self.assertEqual((stats.selected, stats.events, stats.errored), (4, 1, 2))
+        self.assertEqual(
+            dict(decisions),
+            {
+                fixture_uris[0]: "assigned",
+                fixture_uris[1]: "assigned",
+                fixture_uris[2]: "errored",
+                fixture_uris[3]: "errored",
+            },
+        )
 
     def test_headline_drift_does_not_duplicate_event_or_signal_links(self) -> None:
         fixture = Path(__file__).parents[1] / "reference" / "nvda_repost_cluster.json"
@@ -221,7 +438,7 @@ class AggregatePipelineTests(unittest.TestCase):
                     "SELECT post_uri FROM event_signals GROUP BY post_uri HAVING COUNT(*) > 1)"
                 ).fetchone()[0]
 
-        self.assertEqual((stats.events, stats.created, stats.errored), (0, 0, 1))
+        self.assertEqual((stats.events, stats.created, stats.errored), (0, 0, 4))
         self.assertEqual((event_count, duplicate_signals), (2, 0))
 
     def test_bad_model_response_isolated_without_crashing(self) -> None:
@@ -233,7 +450,7 @@ class AggregatePipelineTests(unittest.TestCase):
             with open_database(database) as connection:
                 events = load_events(connection)
 
-        self.assertEqual((stats.selected, stats.events, stats.created, stats.errored), (4, 0, 0, 1))
+        self.assertEqual((stats.selected, stats.events, stats.created, stats.errored), (4, 0, 0, 4))
         self.assertEqual(events, [])
 
     def test_bad_event_does_not_block_valid_sibling(self) -> None:
@@ -297,6 +514,69 @@ class AggregatePipelineTests(unittest.TestCase):
         self.assertNotIn("at://stream/too-old", {row["uri"] for row in rows})
         self.assertEqual(rows, sorted(rows, key=lambda row: (row["created_at"], row["uri"])))
         self.assertEqual(rows[-1]["uri"], "at://stream/recent/201")
+
+    def test_pending_selection_is_oldest_first_and_skips_decided_posts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "pending.db"
+            with open_database(database) as connection:
+                for index in range(6):
+                    insert_post(connection, {
+                        "uri": f"at://stream/pending/{index}",
+                        "cid": f"cid-{index}",
+                        "record": {
+                            "text": f"post {index}",
+                            "createdAt": f"2026-08-24T15:0{index}:00+00:00",
+                        },
+                    })
+                connection.execute(
+                    "UPDATE post_aggregation_decisions SET state='ignored', reason='fixture' "
+                    "WHERE post_uri IN (?, ?)",
+                    ("at://stream/pending/0", "at://stream/pending/1"),
+                )
+
+            rows = _load_pending(database, 3)
+
+        self.assertEqual(
+            [row["uri"] for row in rows],
+            [
+                "at://stream/pending/2",
+                "at://stream/pending/3",
+                "at://stream/pending/4",
+            ],
+        )
+
+    def test_retryable_errors_are_isolated_from_fresh_pending_posts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "retry.db"
+            with open_database(database) as connection:
+                for index in range(6):
+                    insert_post(connection, {
+                        "uri": f"at://stream/retry/{index}",
+                        "cid": f"cid-retry-{index}",
+                        "record": {
+                            "text": f"retry post {index}",
+                            "createdAt": f"2026-08-24T15:0{index}:00+00:00",
+                        },
+                    })
+                connection.execute(
+                    "UPDATE post_aggregation_decisions "
+                    "SET state='errored', attempts=1, reason='fixture', retry_group='group-a' "
+                    "WHERE post_uri IN (?, ?)",
+                    ("at://stream/retry/0", "at://stream/retry/1"),
+                )
+                connection.execute(
+                    "UPDATE post_aggregation_decisions "
+                    "SET state='errored', attempts=1, reason='fixture', retry_group='group-b' "
+                    "WHERE post_uri IN (?, ?)",
+                    ("at://stream/retry/2", "at://stream/retry/3"),
+                )
+
+            rows = _load_pending(database, 5)
+
+        self.assertEqual(
+            [row["uri"] for row in rows],
+            ["at://stream/retry/0", "at://stream/retry/1"],
+        )
 
 
 if __name__ == "__main__":

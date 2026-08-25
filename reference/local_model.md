@@ -1,6 +1,8 @@
 # Reference — the local model (Qwen 3.8 27B on Ollama)
 
-All FinTick reasoning runs on this local model. Loopback only; no cloud, no keys.
+This is FinTick's optional local inference route. It is loopback-only and requires no provider key.
+Production aggregation defaults to Luna through external Hermes-managed OAuth; FinTick itself never
+reads or stores that authentication state.
 
 - Endpoint host: `http://localhost:11434`
 - Model: **`qwen3.8:27b`**
@@ -43,8 +45,8 @@ All FinTick reasoning runs on this local model. Loopback only; no cloud, no keys
 - **Throughput:** 27B dense on a 16 GB GPU is not instant, and thinking adds overhead. That's fine —
   the enricher runs continuously in the background and the tape shows raw headlines immediately,
   filling in enrichment as it completes. Don't block ingest on enrichment.
-- **No fallback to cloud.** The config lists cloud fallbacks but no API keys are set, so if you call
-  a non-local model it will simply fail. Stay on `qwen3.8:27b` / localhost.
+- This remains the optional local-provider path. Production aggregation defaults to Luna through
+  Hermes-managed OAuth; benchmark both routes through `python3 -m fintick.benchmark`.
 
 ## Sanity check you can run
 
