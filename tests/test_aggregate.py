@@ -14,8 +14,7 @@ from fintick.aggregate import (
     _load_pending,
     _load_window,
     aggregate_once,
-    call_hermes_model,
-    call_local_model,
+    call_inference,
     parse_accounted_aggregation,
     parse_aggregation,
 )
@@ -54,41 +53,34 @@ def _event(**overrides: object) -> dict[str, object]:
     return event
 
 
-class HermesModelCallTests(unittest.TestCase):
-    def test_luna_uses_hermes_oauth_without_shell_or_repo_credentials(self) -> None:
-        completed = mock.Mock(returncode=0, stdout='{"events":[],"ignored_posts":[]}\n')
-        with mock.patch("fintick.aggregate.subprocess.run", return_value=completed) as run:
-            result = call_hermes_model("model prompt", executable="/usr/bin/hermes")
-
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[0], "/usr/bin/hermes")
-        self.assertIn("openai-codex", argv)
-        self.assertIn("gpt-5.6-luna", argv)
-        self.assertIn("none", argv)
-        self.assertIn("-t", argv)
-        self.assertEqual(argv[argv.index("-t") + 1], "context_engine")
-        self.assertEqual(argv[-2], "-z")
-        self.assertTrue(argv[-1].endswith("model prompt"))
-        self.assertIn("post_ids", argv[-1])
-        self.assertIn("ignored_posts", argv[-1])
-        self.assertNotIn("shell", run.call_args.kwargs)
-        self.assertEqual(result, '{"events":[],"ignored_posts":[]}')
-
-
-class LocalModelCallTests(unittest.TestCase):
+class InferenceCallTests(unittest.TestCase):
     @mock.patch("fintick.aggregate.urllib.request.urlopen")
-    def test_disables_reasoning_and_bounds_json_output(self, urlopen: mock.Mock) -> None:
+    def test_posts_openai_compatible_forced_json_request(self, urlopen: mock.Mock) -> None:
         urlopen.return_value = BytesIO(json.dumps({
-            "message": {"content": "{\"events\":[]}"}
+            "choices": [{"message": {"content": "{\"events\":[]}"}}]
         }).encode())
 
-        content = call_local_model("[]")
+        content = call_inference(
+            "[]", base_url="https://llm.test/v1", api_key="k-123", model="m-1"
+        )
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data)
 
         self.assertEqual(content, '{"events":[]}')
-        self.assertIs(payload["think"], False)
-        self.assertLessEqual(payload["options"]["num_predict"], 4096)
+        self.assertEqual(request.full_url, "https://llm.test/v1/chat/completions")
+        self.assertEqual(request.headers["Authorization"], "Bearer k-123")
+        self.assertEqual(payload["model"], "m-1")
+        self.assertIs(payload["stream"], False)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertLessEqual(payload["max_tokens"], 4096)
+
+    @mock.patch("fintick.aggregate.urllib.request.urlopen")
+    def test_empty_content_raises(self, urlopen: mock.Mock) -> None:
+        urlopen.return_value = BytesIO(json.dumps({
+            "choices": [{"message": {"content": "   "}}]
+        }).encode())
+        with self.assertRaises(RuntimeError):
+            call_inference("[]")
 
 
 class AccountedAggregationTests(unittest.TestCase):

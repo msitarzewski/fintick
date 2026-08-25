@@ -23,8 +23,6 @@ PROC_ROOT=${FINTICK_PROC_ROOT:-/proc}
 DASHBOARD_PORT=${FINTICK_DASHBOARD_PORT:-8137}
 VERIFY_TIMEOUT=${FINTICK_VERIFY_TIMEOUT:-180}
 PYTHON=${FINTICK_PYTHON:-/usr/bin/python3}
-HERMES=${FINTICK_HERMES:-$(command -v hermes || true)}
-HERMES_BIN_DIR=$(dirname -- "${HERMES:-/nonexistent}")
 UNIT_NAMES=(
   fintick-ingest.service
   fintick-aggregate.service
@@ -38,10 +36,6 @@ if [[ ! -f "${REPO_DIR}/PRD.md" || ! -d "${REPO_DIR}/fintick" ]]; then
 fi
 if [[ ${DRY_RUN} == false && ! -x "${PYTHON}" ]]; then
   echo "Python executable not found: ${PYTHON}" >&2
-  exit 1
-fi
-if [[ ${DRY_RUN} == false && ! -x "${HERMES}" ]]; then
-  echo "Hermes executable not found. Set FINTICK_HERMES to its absolute path." >&2
   exit 1
 fi
 if [[ ${DRY_RUN} == false && ( -e "${ENVIRONMENT_FILE}" || -L "${ENVIRONMENT_FILE}" ) ]]; then
@@ -134,7 +128,7 @@ Type=simple
 WorkingDirectory=${REPO_DIR}
 ${environment_file}
 Environment="PYTHONUNBUFFERED=1"
-Environment="PATH=${HERMES_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin"
 ExecStart=${command}
 Restart=on-failure
 RestartSec=5
@@ -457,8 +451,9 @@ write_unit fintick-ingest.service \
   "network-online.target"
 write_unit fintick-aggregate.service \
   "FinTick accountable event aggregation" \
-  "${PYTHON} -m fintick aggregate --database ${DATA_DIR}/fintick.db --provider hermes --model gpt-5.6-luna --hermes-executable ${HERMES} --limit 50 --watch --interval 60" \
-  "network-online.target fintick-ingest.service"
+  "${PYTHON} -m fintick aggregate --database ${DATA_DIR}/fintick.db --limit 50 --watch --interval 60" \
+  "network-online.target fintick-ingest.service" \
+  "EnvironmentFile=-%h/.config/fintick/environment"
 write_unit fintick-validate.service \
   "FinTick independent event validation" \
   "${PYTHON} -m fintick validate --database ${DATA_DIR}/fintick.db --watch --interval 300 --min-age 900" \

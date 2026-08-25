@@ -83,11 +83,11 @@ python3 -m fintick serve --port 8137
 | Stage | Production default | Offline / local path |
 |---|---|---|
 | Stream ingest | Public Bluesky AppView API, no authentication | Checked-in fixtures |
-| Event aggregation | GPT-5.6 Luna through Hermes-managed `openai-codex` OAuth | Injected fixture responses or an Ollama-compatible endpoint |
+| Event aggregation | Any OpenAI-compatible endpoint (`FINTICK_LLM_*`) — a free local ollama server by default, or a cloud model like GPT-5.6 Luna | Injected fixture responses or the same endpoint |
 | News validation | common.vision Partner API | Direct Google News RSS or stubbed candidates |
 | Storage and dashboard | SQLite + Python standard library | The same code path |
 
-The Hermes invocation uses safe mode, no shell, and an empty operational toolset. Untrusted stream text can be interpreted as financial content, but it cannot invoke agent tools. FinTick never reads or copies Hermes credentials.
+Inference is a single forced-JSON call to an OpenAI-compatible chat endpoint — no agent, no shell, no OAuth, no credentials on disk beyond the API key you place in `.env`. Untrusted stream text is treated strictly as content; it never drives tools. Point `FINTICK_LLM_BASE_URL`/`_API_KEY`/`_MODEL` at local ollama (free, the default) or any hosted provider.
 
 When common.vision is configured, publisher identity comes from `article.metadata.source`; `article.feed` is retained separately as ingestion provenance. The feed carrying a story is not counted as another publisher.
 
@@ -97,7 +97,7 @@ When common.vision is configured, publisher identity comes from `article.metadat
 flowchart LR
     A["Public financial stream<br/>signal"] --> B["Durable URI ingest"]
     B --> C["Oldest-pending<br/>accounting ledger"]
-    C --> D["Short-ID aggregation<br/>Hermes / local provider"]
+    C --> D["Short-ID aggregation<br/>OpenAI-compatible endpoint"]
     D --> E["Canonical events<br/>facts + instruments"]
     E --> F["Independent news hunt<br/>common.vision / RSS"]
     F --> G{"Validation"}
@@ -189,8 +189,10 @@ Rollback is fail-closed. Prior writers restart only after database recovery, uni
 The fixed 28-post corpus exercises the same short-ID parser and accounting contract used in production:
 
 ```bash
-python3 -m fintick.benchmark --provider hermes --model gpt-5.6-luna
-python3 -m fintick.benchmark --provider local --model YOUR_OLLAMA_MODEL
+# Uses FINTICK_LLM_* from the environment (local ollama by default):
+python3 -m fintick.benchmark
+# Or point it at a specific endpoint/model:
+python3 -m fintick.benchmark --base-url https://api.openai.com/v1 --model gpt-5.6-luna
 ```
 
 The benchmark prints aggregate metrics only. Raw model responses are not written to the repository.
