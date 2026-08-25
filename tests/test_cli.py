@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from fintick.aggregate import AggregateStats
 from fintick.cli import main
 from fintick.enrich import EnrichStats
 from fintick.research import ResearchStats
@@ -38,6 +39,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(count, 60)
         self.assertIn("fetched=60 new=60 deduped=5 pages=1", output.getvalue())
+
+    @mock.patch(
+        "fintick.cli.aggregate_once",
+        return_value=AggregateStats(selected=4, events=1, created=1, errored=0),
+    )
+    def test_aggregate_command_reports_event_counts(self, aggregate_once: mock.Mock) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["aggregate", "--database", "/tmp/events.db", "--limit", "4"])
+
+        self.assertEqual(result, 0)
+        aggregate_once.assert_called_once_with("/tmp/events.db", limit=4)
+        self.assertIn("aggregate selected=4 events=1 new=1 errored=0", output.getvalue())
+
     def test_research_command_reports_no_eligible_items(self) -> None:
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(output):

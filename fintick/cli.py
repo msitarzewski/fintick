@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from fintick import __version__
+from fintick.aggregate import MAX_POSTS, aggregate_once
 from fintick.dashboard import serve_dashboard
 from fintick.enrich import enrich_pending
 from fintick.ingest import BlueskyFeedClient, ingest_author_feed, ingest_fixture
@@ -46,6 +47,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest.add_argument("--watch", action="store_true", help="poll continuously")
     ingest.add_argument(
+        "--interval", type=float, default=900, help="watch interval in seconds (default: 900)"
+    )
+    aggregate = subparsers.add_parser(
+        "aggregate", help="merge the rolling stream window into distinct events with local Qwen"
+    )
+    aggregate.add_argument(
+        "--database", default="data/fintick.db", help="SQLite database path"
+    )
+    aggregate.add_argument(
+        "--limit", type=int, default=MAX_POSTS, choices=range(1, MAX_POSTS + 1),
+        help=f"maximum posts in the six-hour window (default: {MAX_POSTS})",
+    )
+    aggregate.add_argument("--watch", action="store_true", help="aggregate continuously")
+    aggregate.add_argument(
         "--interval", type=float, default=900, help="watch interval in seconds (default: 900)"
     )
     enrich = subparsers.add_parser(
@@ -125,6 +140,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_periodically("ingest", ingest_cycle, args.interval)
         else:
             ingest_cycle()
+        return 0
+
+    if args.command == "aggregate":
+        def aggregate_cycle() -> None:
+            stats = aggregate_once(args.database, limit=args.limit)
+            print(
+                f"{timestamp()} aggregate selected={stats.selected} events={stats.events} "
+                f"new={stats.created} errored={stats.errored}", flush=True
+            )
+        if args.watch:
+            run_periodically("aggregate", aggregate_cycle, args.interval)
+        else:
+            aggregate_cycle()
         return 0
 
     if args.command == "enrich":

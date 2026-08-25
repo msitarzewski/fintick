@@ -4,7 +4,7 @@
      one-paragraph summary, then run: hermes cron pause fintick-build -->
 STATUS: IN PROGRESS
 
-**Current milestone:** M2 — Aggregate (M1 schema done 2026-08-25).
+**Current milestone:** M3 — Facts (M2 aggregate done 2026-08-25; live model smoke deferred).
 
 ## The v2 pivot (read this first every fire)
 v1 is tagged **`v1-baseline`** (a working per-post ticker) and its acceptance polish is stashed
@@ -30,9 +30,16 @@ Canonical test fixture: `reference/nvda_repost_cluster.json` — the four NVDA p
       CLI help for retired v1 middle marked "RETAINED v1-baseline only". 59/59 tests green
       (47 legacy + 12 v2, `tests/test_storage_v2.py`). Verified: fresh DB has all 6 tables; v1-baseline
       DB gains exactly the 3 new tables on next open, idempotent; `ingest --fixture` round-trips 60 posts.
-- [ ] **M2 — Aggregate.** Rolling-6h-window batch → **one** local-Qwen call → distinct events +
+- [x] **M2 — Aggregate.** Rolling-6h-window batch → **one** local-Qwen call → distinct events +
       `stream_post_uris` mapping, schema-validated, resilient to bad JSON.
       **Acceptance: the NVDA fixture → 1 event, 4 signals, instruments unify `$NVDA`/`NVIDIA`.**
+      ✅ 2026-08-25: `fintick aggregate` selects ≤200 posts from the latest six-hour window in
+      chronological order, makes one forced-JSON Ollama call, validates each event independently,
+      rejects unknown/reused URIs, normalizes symbols/directions, and idempotently persists through
+      the M1 API. Canonical fixture passes offline with an injected model response: 4 posts → 1 event,
+      4 signals, unified NVDA; malformed top-level output and malformed sibling events are isolated.
+      67/67 tests green. Live `qwen3.8:27b` smoke is deferred: the runtime approval layer blocked the
+      local endpoint check; do not treat model-quality behavior as live-verified yet.
 - [ ] **M3 — Facts.** Structured claim extraction per event (down-day count, % move, etc.), local model.
 - [ ] **M4 — Validate (core).** External news hunt via `curl` (RSS/news JSON, NO browser) →
       `validating_sources` + `status` (breaking / confirmed / contradicted / developing) + lead time.
