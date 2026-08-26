@@ -72,7 +72,7 @@ class InferenceCallTests(unittest.TestCase):
         self.assertEqual(payload["model"], "m-1")
         self.assertIs(payload["stream"], False)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
-        self.assertLessEqual(payload["max_completion_tokens"], 4096)
+        self.assertEqual(payload["max_completion_tokens"], 16384)
 
     @mock.patch("fintick.aggregate.urllib.request.urlopen")
     def test_empty_content_raises(self, urlopen: mock.Mock) -> None:
