@@ -20,6 +20,7 @@ from fintick.storage import (
     POST_AGGREGATION_MAX_ATTEMPTS,
     V2Event,
     open_database,
+    record_inference_usage,
     set_post_aggregation_decision,
     upsert_event,
 )
@@ -36,7 +37,21 @@ DEFAULT_MODEL = LLM_MODEL  # backward-compat alias
 # must leave room for both. 4096 gets fully consumed by reasoning on hard batches -> empty content;
 # 16384 leaves ample headroom (observed ~5-7k total). Tunable per-model via the env var.
 LLM_MAX_TOKENS = int(os.environ.get("FINTICK_LLM_MAX_TOKENS", "16384"))
+# USD per 1M tokens (input, output). Cloud models are priced here; local/unknown
+# models are free. Keys are matched case-insensitively. Extend as models are added.
+LLM_PRICES = {"gpt-5.6-luna": (0.20, 1.20)}
 WINDOW = timedelta(hours=6)
+
+
+def inference_cost_usd(
+    model: str | None, prompt_tokens: int, completion_tokens: int
+) -> float:
+    """Dollar cost of one call's tokens for the given model (0 for local/unknown)."""
+    price = LLM_PRICES.get((model or "").lower())
+    if not price:
+        return 0.0
+    price_in, price_out = price
+    return (prompt_tokens / 1_000_000) * price_in + (completion_tokens / 1_000_000) * price_out
 MAX_POSTS = 200
 DEFAULT_BATCH = 50
 
@@ -419,6 +434,7 @@ def call_inference(
     api_key: str | None = None,
     model: str | None = None,
     timeout: float = 300.0,
+    usage_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Make one forced-JSON call to an OpenAI-compatible chat endpoint.
 
@@ -449,10 +465,19 @@ def call_inference(
         },
         method="POST",
     )
+    usage_payload: dict[str, Any] | None = None
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.load(response)
         content = data["choices"][0]["message"]["content"]
+        if usage_sink is not None:
+            usage = data.get("usage") if isinstance(data, dict) else None
+            usage = usage if isinstance(usage, dict) else {}
+            usage_payload = {
+                "model": model,
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+            }
     except (
         OSError,
         urllib.error.URLError,
@@ -462,6 +487,13 @@ def call_inference(
         IndexError,
     ) as error:
         raise RuntimeError(f"aggregation request failed: {error}") from error
+    # Record usage even when the content is empty — those tokens were still spent.
+    # A logging failure must never fail the aggregation call.
+    if usage_sink is not None and usage_payload is not None:
+        try:
+            usage_sink(usage_payload)
+        except Exception:
+            pass
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("aggregation model returned empty or non-text content")
     return content
@@ -495,8 +527,18 @@ def aggregate_once(
 
     try:
         if call_model is None:
+            def _record_usage(usage: dict[str, Any]) -> None:
+                try:
+                    with open_database(database) as connection:
+                        record_inference_usage(
+                            connection, usage["model"],
+                            usage["prompt_tokens"], usage["completion_tokens"],
+                        )
+                except Exception:
+                    pass
             call_model = lambda value: call_inference(
-                value, base_url=base_url, api_key=api_key, model=model
+                value, base_url=base_url, api_key=api_key, model=model,
+                usage_sink=_record_usage,
             )
         raw_content = call_model(prompt)
         raw_object = _json_object(raw_content)

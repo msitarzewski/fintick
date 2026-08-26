@@ -12,8 +12,14 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
+from fintick.aggregate import inference_cost_usd
 from fintick.service_handoff import database_identity
-from fintick.storage import load_events, load_pipeline_health, open_database
+from fintick.storage import (
+    load_events,
+    load_inference_usage,
+    load_pipeline_health,
+    open_database,
+)
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 250
@@ -91,7 +97,20 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
     with open_database(database) as connection:
         events = load_events(connection, limit=None)
         pipeline = load_pipeline_health(connection)
+        usage = load_inference_usage(connection)
     pipeline["database_identity"] = database_identity(database)
+    # Operator cost tracker: price each window's per-model token sums (see ?ops).
+    pipeline["cost"] = {
+        label: {
+            "usd": round(sum(
+                inference_cost_usd(
+                    row["model"], row["prompt_tokens"], row["completion_tokens"]
+                ) for row in rows
+            ), 4),
+            "calls": sum(row["calls"] for row in rows),
+        }
+        for label, rows in usage.items()
+    }
     now = datetime.now(UTC)
     for event in events:
         event["validations"] = _safe_validations(event.get("validations"))
@@ -169,7 +188,9 @@ h1{margin:0;color:var(--amber);font-size:clamp(24px,3vw,34px);letter-spacing:-.0
 .theme-toggle{appearance:none;width:34px;height:34px;flex:0 0 auto;border:1px solid var(--line);background:var(--pill);color:var(--text);border-radius:8px;font-size:15px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color .12s,background-color .12s}.theme-toggle:hover{border-color:var(--amber)}.theme-toggle:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 .strip{display:flex;align-items:stretch;gap:12px;margin-top:14px}
 /* Operator-only telemetry: hidden unless ?ops is set (see head script). */
-:root:not([data-ops="1"]) .pipeline-health,:root:not([data-ops="1"]) .connection{display:none}
+:root:not([data-ops="1"]) .pipeline-health,:root:not([data-ops="1"]) .connection,:root:not([data-ops="1"]) .cost{display:none}
+.cost{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin-top:10px;padding:8px 14px;border:1px solid var(--line);background:var(--pill);color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
+.cost .lead{color:var(--amber)}.cost b{color:var(--text);font-weight:650;font-variant-numeric:tabular-nums}.cost .calls{color:var(--dim);text-transform:none;letter-spacing:0}
 .pipeline-health{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;padding:9px 14px;border:1px solid var(--line);background:var(--pill);color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.pipeline-health b{color:var(--text);font-weight:650}.pipeline-health .good b{color:var(--confirmed)}.pipeline-health .warn b{color:var(--developing)}.pipeline-health .bad b{color:var(--breaking)}
 .metrics{flex:1 1 auto;display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:0}
 .metric{appearance:none;margin:0;padding:8px 14px;background:var(--pill);border:1px solid var(--line);border-radius:999px;font:inherit;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:8px;white-space:nowrap;transition:background-color .12s,border-color .12s,color .12s}
@@ -208,6 +229,7 @@ footer{padding:20px;border-top:1px solid var(--line);color:var(--dim);text-align
     <div class="pipeline-health" id="pipeline-health" aria-label="Pipeline accounting">Awaiting pipeline health…</div>
     <div class="tape" aria-label="Latest event ticker"><div class="tape-track" id="tape"></div></div>
   </div>
+  <div class="cost" id="cost" aria-label="Inference cost tracker"></div>
 </header>
 <main>
   <div class="board-head"><div><h2>The Edge Board</h2><p>What the stream caught—and whether the news has caught up.</p></div><span class="updated" id="updated">Awaiting events…</span></div>
@@ -222,7 +244,8 @@ function relativeTime(value){const time=Date.parse(value);if(!Number.isFinite(ti
 function safeStatus(value){return['breaking','confirmed','contradicted','developing','unconfirmed'].includes(value)?value:'developing'}
 function badgeText(item){const n=Array.isArray(item.validations)?item.validations.length:0;switch(safeStatus(item.status)){case'breaking':return'BREAKING — no corroboration yet';case'unconfirmed':return'UNCONFIRMED — wire still silent';case'confirmed':return'CONFIRMED — '+n+' source'+(n===1?'':'s');case'contradicted':return'CONTRADICTED';default:return'DEVELOPING'}}
 function lagText(seconds){if(!Number.isFinite(seconds))return'';const abs=Math.abs(seconds),value=abs<3600?Math.round(abs/60)+' min':(abs/3600).toFixed(1)+' hr';return seconds>=0?'news +'+value+' after the stream':'news '+value+' before the stream'}
-function renderPipeline(value){const p=value&&typeof value==='object'?value:{},node=$('pipeline-health'),backlog=Number(p.backlog)||0,errors=Number(p.terminal_errors)||0,accounted=Number(p.accounted)||0,posts=Number(p.posts)||0;node.replaceChildren();let state='CAUGHT UP';if(errors>0){state='TERMINAL ERRORS'}else if(backlog>0){state='CATCHING UP'}const coverage=element('span','');coverage.append(document.createTextNode('accounted '),element('b','',accounted+' / '+posts));node.append(coverage);const queue=element('span',backlog?'warn':'good');queue.append(document.createTextNode('backlog '),element('b','',String(backlog)));node.append(queue);if(backlog&&p.oldest_pending_at){const oldest=element('span','');oldest.append(document.createTextNode('oldest '),element('b','',relativeTime(p.oldest_pending_at)));node.append(oldest)}if(errors){const terminal=element('span','bad');terminal.append(document.createTextNode('errors '),element('b','',String(errors)));node.append(terminal)}$('connection').textContent=state;$('pulse').classList.toggle('catchup',backlog>0&&!errors);$('pulse').classList.toggle('error',errors>0)}
+function renderPipeline(value){const p=value&&typeof value==='object'?value:{},node=$('pipeline-health'),backlog=Number(p.backlog)||0,errors=Number(p.terminal_errors)||0,accounted=Number(p.accounted)||0,posts=Number(p.posts)||0;node.replaceChildren();let state='CAUGHT UP';if(errors>0){state='TERMINAL ERRORS'}else if(backlog>0){state='CATCHING UP'}const coverage=element('span','');coverage.append(document.createTextNode('accounted '),element('b','',accounted+' / '+posts));node.append(coverage);const queue=element('span',backlog?'warn':'good');queue.append(document.createTextNode('backlog '),element('b','',String(backlog)));node.append(queue);if(backlog&&p.oldest_pending_at){const oldest=element('span','');oldest.append(document.createTextNode('oldest '),element('b','',relativeTime(p.oldest_pending_at)));node.append(oldest)}if(errors){const terminal=element('span','bad');terminal.append(document.createTextNode('errors '),element('b','',String(errors)));node.append(terminal)}$('connection').textContent=state;$('pulse').classList.toggle('catchup',backlog>0&&!errors);$('pulse').classList.toggle('error',errors>0);renderCost(p.cost)}
+function renderCost(cost){const node=$('cost');if(!node)return;node.replaceChildren();const c=cost&&typeof cost==='object'?cost:{},labels={hour:'1H',day:'24H',week:'7D',month:'30D'};node.append(element('span','lead','inference cost'));for(const key of ['hour','day','week','month']){const w=c[key]||{},usd=Number(w.usd)||0,calls=Number(w.calls)||0,span=element('span','');span.append(document.createTextNode(labels[key]+' '),element('b','','$'+usd.toFixed(usd<1?4:2)));if(calls)span.append(element('span','calls',' ('+calls+' call'+(calls===1?'':'s')+')'));node.append(span)}}
 const FILTERS=[['all','all'],['breaking','breaking'],['unconfirmed','unconfirmed'],['developing','developing'],['confirmed','confirmed'],['contradicted','contradicted']];
 const activeFilters=new Set();
 function statusCount(items,status){return status==='all'?items.length:items.filter(x=>x.status===status).length}
