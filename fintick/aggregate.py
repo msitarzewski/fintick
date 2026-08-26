@@ -43,7 +43,9 @@ DEFAULT_BATCH = 50
 SYSTEM_PROMPT = """You aggregate posts from ONE fast financial stream into distinct real-world events.
 Return JSON with exactly two top-level arrays: events and ignored_posts. Each event must contain:
 canonical_headline (concise), summary (one sentence), importance (integer 1-5),
-instruments (array of {symbol,name,type,direction}; direction is up/down/flat),
+instruments (array of {symbol,name,type,direction}; direction is up/down/flat; symbol is the
+ticker when one exists, otherwise leave it "" — indices, government bonds, FX, and commodities
+usually have no ticker and are identified by name and type; never invent a ticker),
 facts (array of {label,value} for concrete claims such as percentage moves, counts, prices, dates), and
 post_ids (the exact short input IDs supporting that event). Each ignored_posts item must be
 {"id":"p001","reason":"brief concrete reason"}.
@@ -141,8 +143,14 @@ def _parse_event(
         name = item.get("name")
         instrument_type = item.get("type")
         direction = str(item.get("direction", "")).lower().strip()
-        if not isinstance(symbol, str) or not symbol.strip():
-            raise ValueError("each instrument requires a symbol")
+        # Symbol is OPTIONAL: indices, sovereign bonds, FX, commodities, and many
+        # private or foreign issuers have no ticker. Such an instrument is identified
+        # by name + type — require those, and normalize a symbol only when one is given.
+        if symbol is not None and not isinstance(symbol, str):
+            raise ValueError("instrument symbol must be a string when present")
+        normalized_symbol = (
+            symbol.strip().lstrip("$").upper() if isinstance(symbol, str) else ""
+        )
         if not isinstance(name, str) or not name.strip():
             raise ValueError("each instrument requires a name")
         if not isinstance(instrument_type, str) or not instrument_type.strip():
@@ -150,7 +158,7 @@ def _parse_event(
         if direction not in DIRECTIONS:
             raise ValueError("instrument direction must be up, down, or flat")
         instruments.append({
-            "symbol": symbol.strip().lstrip("$").upper(),
+            "symbol": normalized_symbol,
             "name": name.strip(),
             "type": instrument_type.strip().lower(),
             "direction": direction,
@@ -191,7 +199,11 @@ def _parse_event(
         raise ValueError("importance must be between 1 and 5")
 
     timestamps = [post_times[uri] for uri in uris]
-    primary = instruments[0]["symbol"] if instruments else None
+    # Fall back to the instrument name when it carries no ticker, so events still
+    # get a stable, meaningful identity component (indices, bonds, FX, commodities).
+    primary = None
+    if instruments:
+        primary = instruments[0]["symbol"] or instruments[0]["name"]
     return V2Event.from_key(
         headline.strip(),
         summary.strip(),

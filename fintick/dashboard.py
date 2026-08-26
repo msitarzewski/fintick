@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -16,7 +17,28 @@ from fintick.storage import load_events, load_pipeline_health, open_database
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 250
-STATUS_ORDER = {"breaking": 0, "contradicted": 1, "developing": 2, "confirmed": 3}
+# 'unconfirmed' sinks to the bottom: it is breaking that the wire never caught up on.
+STATUS_ORDER = {
+    "breaking": 0, "contradicted": 1, "developing": 2, "confirmed": 3, "unconfirmed": 4,
+}
+# A breaking event ages into 'unconfirmed' once the wire has had this long to catch up
+# and still hasn't. Purely a passage-of-time lens over the stored validation fact
+# (breaking = no corroboration found), so the flip needs no re-hunt and no DB write.
+BREAKING_TTL_SECONDS = int(os.environ.get("FINTICK_BREAKING_TTL_SECONDS", "3600"))
+
+
+def _effective_status(status: Any, first_seen_at: Any, now: datetime) -> str:
+    """Derive the display status: breaking past its TTL reads as 'unconfirmed'."""
+    if status != "breaking":
+        return str(status)
+    try:
+        first = datetime.fromisoformat(str(first_seen_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "breaking"
+    if first.tzinfo is None:
+        return "breaking"
+    age = (now - first.astimezone(UTC)).total_seconds()
+    return "unconfirmed" if age >= BREAKING_TTL_SECONDS else "breaking"
 
 
 def _safe_validations(value: Any) -> list[dict[str, Any]]:
@@ -70,8 +92,12 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
         events = load_events(connection, limit=None)
         pipeline = load_pipeline_health(connection)
     pipeline["database_identity"] = database_identity(database)
+    now = datetime.now(UTC)
     for event in events:
         event["validations"] = _safe_validations(event.get("validations"))
+        event["status"] = _effective_status(
+            event.get("status"), event.get("first_seen_at"), now
+        )
     events.sort(key=lambda event: (
         STATUS_ORDER.get(str(event.get("status")), 9),
         str(event.get("first_seen_at", "")),
@@ -79,7 +105,7 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
     ))
     # Keep each status group newest-first without letting recency outrank urgency.
     ordered: list[dict[str, Any]] = []
-    for status in ("breaking", "contradicted", "developing", "confirmed"):
+    for status in ("breaking", "contradicted", "developing", "confirmed", "unconfirmed"):
         group = [event for event in events if event.get("status") == status]
         group.sort(key=lambda event: (str(event.get("first_seen_at", "")), int(event["id"])), reverse=True)
         ordered.extend(group)
@@ -98,46 +124,91 @@ DASHBOARD_HTML = r'''<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
 <title>FinTick — The Edge Board</title>
+<script>try{var t=localStorage.getItem('fintick-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}
+/* Operator telemetry (pipeline health + status pill) is hidden for public visitors.
+   Reveal it with ?ops (or ?ops=1) — it persists per-browser; ?ops=0 clears it. */
+try{var q=new URLSearchParams(location.search),op;if(q.has('ops')){op=q.get('ops')!=='0';localStorage.setItem('fintick-ops',op?'1':'0')}else{op=localStorage.getItem('fintick-ops')==='1'}if(op)document.documentElement.dataset.ops='1'}catch(e){}</script>
 <style>
 :root {
   --night:#0b0d0c; --surface:#121513; --lift:#181c19; --line:#303630;
   --text:#e2e7e3; --muted:#98a29b; --dim:#687169;
   --breaking:#ff6b61; --confirmed:#62d391; --developing:#e7b95b;
-  --contradicted:#cf8cff; --cyan:#75cbd0; --amber:#e0a765;
+  --contradicted:#cf8cff; --cyan:#75cbd0; --amber:#e0a765; --unconfirmed:#8f9aa0;
+  --glow1:#252017; --glow2:#13231b; --panel:#0e110f; --pill:rgba(0,0,0,.16);
+  --shadow:rgba(0,0,0,.22); --inset-line:#303831; --card-sheen:rgba(255,255,255,.025);
+}
+/* Light palette — status hues darkened for contrast on paper. */
+:root[data-theme="light"] {
+  --night:#f3f1ea; --surface:#ffffff; --lift:#eeeae1; --line:#d7d2c4;
+  --text:#1a1f1b; --muted:#59625a; --dim:#8b938b;
+  --breaking:#cf3327; --confirmed:#1c9a53; --developing:#9c6f16;
+  --contradicted:#8a44c6; --cyan:#1c848a; --amber:#a76a17; --unconfirmed:#5f6870;
+  --glow1:#efe8d7; --glow2:#e1ece4; --panel:#eeeae1; --pill:rgba(0,0,0,.035);
+  --shadow:rgba(60,55,40,.12); --inset-line:#e2ded1; --card-sheen:rgba(0,0,0,.015);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --night:#f3f1ea; --surface:#ffffff; --lift:#eeeae1; --line:#d7d2c4;
+    --text:#1a1f1b; --muted:#59625a; --dim:#8b938b;
+    --breaking:#cf3327; --confirmed:#1c9a53; --developing:#9c6f16;
+    --contradicted:#8a44c6; --cyan:#1c848a; --amber:#a76a17; --unconfirmed:#5f6870;
+    --glow1:#efe8d7; --glow2:#e1ece4; --panel:#eeeae1; --pill:rgba(0,0,0,.035);
+    --shadow:rgba(60,55,40,.12); --inset-line:#e2ded1; --card-sheen:rgba(0,0,0,.015);
+  }
 }
 *{box-sizing:border-box} html{background:var(--night);color:var(--text);font-family:"IBM Plex Mono","SFMono-Regular",Consolas,monospace}
-body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% -10%,#252017 0,transparent 31rem),radial-gradient(circle at 90% 10%,#13231b 0,transparent 35rem),var(--night)}
+body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% -10%,var(--glow1) 0,transparent 31rem),radial-gradient(circle at 90% 10%,var(--glow2) 0,transparent 35rem),var(--night);transition:background-color .2s,color .2s}
 .skip{position:absolute;left:-9999px}.skip:focus{left:16px;top:16px;z-index:5;background:var(--amber);color:var(--night);padding:12px}
-header{padding:24px clamp(18px,4vw,60px) 18px;border-bottom:1px solid var(--line)}
-.header-row{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.brand{display:flex;align-items:baseline;gap:15px}
+header{position:sticky;top:0;z-index:30;padding:15px clamp(18px,4vw,60px);border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--night) 72%,transparent);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4)}
+.topnav{display:flex;align-items:center;flex-wrap:wrap;justify-content:space-between;gap:12px 20px}.brand{display:flex;align-items:baseline;gap:15px;flex:0 0 auto}
 h1{margin:0;color:var(--amber);font-size:clamp(24px,3vw,34px);letter-spacing:-.07em}.brand span{font-size:10px;letter-spacing:.17em;text-transform:uppercase;color:var(--muted)}
 .connection{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;letter-spacing:.12em}.pulse{width:8px;height:8px;border-radius:50%;background:var(--confirmed);box-shadow:0 0 12px var(--confirmed)}.pulse.catchup{background:var(--developing);box-shadow:0 0 12px var(--developing)}.pulse.error{background:var(--breaking);box-shadow:0 0 12px var(--breaking)}
-.pipeline-health{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:18px;padding:10px 12px;border:1px solid var(--line);background:rgba(0,0,0,.16);color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.pipeline-health b{color:var(--text);font-weight:650}.pipeline-health .good b{color:var(--confirmed)}.pipeline-health .warn b{color:var(--developing)}.pipeline-health .bad b{color:var(--breaking)}
-.metrics{display:flex;flex-wrap:wrap;gap:20px;margin-top:24px}.metric{min-width:108px}.metric b{display:block;font-size:22px;line-height:1.1}.metric span{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.13em}.metric.breaking b{color:var(--breaking)}
-.tape{overflow:hidden;border-bottom:1px solid var(--line);background:#0e110f;white-space:nowrap}.tape-track{display:inline-flex;min-width:max-content;animation:crawl var(--duration,50s) linear infinite}.tape:hover .tape-track{animation-play-state:paused}.tape-group{display:inline-flex}.tick{padding:11px 28px 11px 0;font-size:11px;color:var(--muted)}.tick::before{content:"◆";color:var(--line);margin:0 18px}.tick.breaking{color:var(--breaking)}.tick.confirmed{color:var(--confirmed)}
+.header-right{display:flex;align-items:center;gap:14px}
+.theme-toggle{appearance:none;width:34px;height:34px;flex:0 0 auto;border:1px solid var(--line);background:var(--pill);color:var(--text);border-radius:8px;font-size:15px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color .12s,background-color .12s}.theme-toggle:hover{border-color:var(--amber)}.theme-toggle:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.strip{display:flex;align-items:stretch;gap:12px;margin-top:14px}
+/* Operator-only telemetry: hidden unless ?ops is set (see head script). */
+:root:not([data-ops="1"]) .pipeline-health,:root:not([data-ops="1"]) .connection{display:none}
+.pipeline-health{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;padding:9px 14px;border:1px solid var(--line);background:var(--pill);color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.pipeline-health b{color:var(--text);font-weight:650}.pipeline-health .good b{color:var(--confirmed)}.pipeline-health .warn b{color:var(--developing)}.pipeline-health .bad b{color:var(--breaking)}
+.metrics{flex:1 1 auto;display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:0}
+.metric{appearance:none;margin:0;padding:8px 14px;background:var(--pill);border:1px solid var(--line);border-radius:999px;font:inherit;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:8px;white-space:nowrap;transition:background-color .12s,border-color .12s,color .12s}
+.metric b{font-size:13px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;line-height:1}
+.metric.breaking{--accent:var(--breaking)}.metric.unconfirmed{--accent:var(--unconfirmed)}.metric.developing{--accent:var(--developing)}.metric.confirmed{--accent:var(--confirmed)}.metric.contradicted{--accent:var(--contradicted)}.metric.all{--accent:var(--amber)}
+.metric:hover{border-color:color-mix(in srgb,var(--accent,var(--amber)) 55%,var(--line));color:var(--text)}
+.metric:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.metric.active{background:color-mix(in srgb,var(--accent) 16%,var(--surface));border-color:var(--accent);color:var(--accent)}.metric.active b{color:var(--accent)}
+.tape{flex:1 1 auto;min-width:0;min-height:46px;overflow:hidden;display:flex;align-items:center;border:1px solid var(--line);background:var(--panel);white-space:nowrap;-webkit-mask-image:linear-gradient(90deg,transparent,#000 6%,#000 94%,transparent);mask-image:linear-gradient(90deg,transparent,#000 6%,#000 94%,transparent)}.tape-track{display:inline-flex;min-width:max-content;animation:crawl var(--duration,50s) linear infinite}.tape:hover .tape-track{animation-play-state:paused}.tape-group{display:inline-flex}.tick{font-size:12.5px;color:var(--muted)}.tick::before{content:"◆";color:var(--line);margin:0 20px}.tick.breaking{color:var(--breaking)}.tick.confirmed{color:var(--confirmed)}.tick.unconfirmed{color:var(--unconfirmed)}
+a.tick{text-decoration:none;cursor:pointer}a.tick:hover{text-decoration:underline;text-underline-offset:3px}a.tick:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 @keyframes crawl{to{transform:translateX(-50%)}}
 main{width:min(1320px,calc(100% - 32px));margin:0 auto;padding:38px 0 76px}.board-head{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.board-head h2{margin:0;font-size:15px;letter-spacing:.15em;text-transform:uppercase}.board-head p{margin:7px 0 0;color:var(--muted);font-size:11px}.updated{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
-.feed{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:16px}.card{position:relative;min-width:0;padding:22px;border:1px solid var(--line);border-top:3px solid var(--state);background:linear-gradient(145deg,rgba(255,255,255,.025),transparent 45%),var(--surface)}.card.breaking{--state:var(--breaking);background:linear-gradient(145deg,rgba(255,107,97,.10),transparent 48%),var(--surface);box-shadow:0 0 0 1px rgba(255,107,97,.09),0 15px 50px rgba(0,0,0,.22)}.card.confirmed{--state:var(--confirmed)}.card.developing{--state:var(--developing)}.card.contradicted{--state:var(--contradicted)}
+.feed{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:16px}.card{position:relative;min-width:0;padding:22px;border:1px solid var(--line);border-top:3px solid var(--state);background:linear-gradient(145deg,var(--card-sheen),transparent 45%),var(--surface)}.card.breaking{--state:var(--breaking);background:linear-gradient(145deg,color-mix(in srgb,var(--breaking) 12%,transparent),transparent 48%),var(--surface);box-shadow:0 0 0 1px color-mix(in srgb,var(--breaking) 12%,transparent),0 15px 50px var(--shadow)}.card.confirmed{--state:var(--confirmed)}.card.developing{--state:var(--developing)}.card.contradicted{--state:var(--contradicted)}.card.unconfirmed{--state:var(--unconfirmed)}
+.card{scroll-margin-top:164px}.card:target{box-shadow:0 0 0 2px var(--amber),0 14px 44px var(--shadow);animation:flash 1.1s ease-out}@keyframes flash{0%{box-shadow:0 0 0 3px var(--amber),0 0 30px var(--amber)}100%{box-shadow:0 0 0 2px var(--amber),0 14px 44px var(--shadow)}}
 .badge{display:inline-flex;align-items:center;min-height:32px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--state) 55%,transparent);background:color-mix(in srgb,var(--state) 11%,transparent);color:var(--state);font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}.badge::before{content:"";width:7px;height:7px;border-radius:50%;margin-right:8px;background:var(--state);box-shadow:0 0 9px var(--state)}
-.card-meta{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:16px}.importance{color:var(--amber);font-size:9px;letter-spacing:2px}.importance i{color:#424941;font-style:normal}.headline{margin:0 0 10px;font:650 clamp(17px,1.7vw,21px)/1.38 "IBM Plex Mono","SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere}.summary{margin:0;color:#bcc5be;font-size:13px;line-height:1.6}.origin{margin-top:14px;color:var(--muted);font-size:10px;letter-spacing:.04em}.origin strong{color:var(--text)}
-.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-top:18px}.fact{padding:10px;border:1px solid #303831;background:var(--lift)}.fact b{display:block;color:var(--text);font-size:14px;margin-bottom:3px}.fact span{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}
-.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}.chip{padding:5px 8px;border:1px solid #384039;background:var(--lift);font-size:10px}.chip.up{color:var(--confirmed);border-color:#356347}.chip.down{color:var(--breaking);border-color:#6c403d}
+.card-meta{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:16px}.importance{color:var(--amber);font-size:9px;letter-spacing:2px}.importance i{color:color-mix(in srgb,var(--text) 22%,transparent);font-style:normal}.headline{margin:0 0 10px;font:650 clamp(17px,1.7vw,21px)/1.38 "IBM Plex Mono","SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere}.summary{margin:0;color:color-mix(in srgb,var(--text) 78%,transparent);font-size:13px;line-height:1.6}.origin{margin-top:14px;color:var(--muted);font-size:10px;letter-spacing:.04em}.origin strong{color:var(--text)}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-top:18px}.fact{padding:10px;border:1px solid var(--inset-line);background:var(--lift)}.fact b{display:block;color:var(--text);font-size:14px;margin-bottom:3px}.fact span{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}.chip{padding:5px 8px;border:1px solid var(--inset-line);background:var(--lift);font-size:10px}.chip.up{color:var(--confirmed);border-color:color-mix(in srgb,var(--confirmed) 45%,var(--line))}.chip.down{color:var(--breaking);border-color:color-mix(in srgb,var(--breaking) 45%,var(--line))}
 .sources{margin:18px 0 0;padding:15px 0 0;border-top:1px solid var(--line);list-style:none}.sources li+li{margin-top:9px}.sources a{color:var(--cyan);font-size:11px;line-height:1.45;text-decoration:underline;text-decoration-color:rgba(117,203,208,.35);text-underline-offset:3px}.sources a:focus-visible{outline:2px solid var(--amber);outline-offset:3px}.publisher{color:var(--muted);font-size:10px}.lag{margin-top:12px;color:var(--confirmed);font-size:10px}.empty{grid-column:1/-1;padding:90px 24px;border:1px dashed var(--line);color:var(--muted);text-align:center;line-height:1.8}.error-message{color:var(--breaking)}
 footer{padding:20px;border-top:1px solid var(--line);color:var(--dim);text-align:center;font-size:9px;letter-spacing:.1em}
-@media(max-width:640px){.header-row{align-items:flex-start}.board-head{align-items:flex-start;flex-direction:column;gap:10px}.brand{display:block}.brand span{display:block;margin-top:6px}.feed{grid-template-columns:1fr}.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.metric{min-width:0}}
+@media(max-width:1180px){.metrics{flex:1 1 100%;order:3;margin-top:2px}}
+@media(max-width:760px){.strip{flex-direction:column}.pipeline-health{justify-content:center}.tape{order:2;min-height:46px}}
+@media(max-width:640px){.topnav{align-items:flex-start}.board-head{align-items:flex-start;flex-direction:column;gap:10px}.brand{display:block}.brand span{display:block;margin-top:6px}.feed{grid-template-columns:1fr}.metrics{gap:8px}}
 @media(prefers-reduced-motion:reduce){.tape-track{animation:none}}
 </style>
 </head>
 <body>
 <a class="skip" href="#feed">Skip to event board</a>
 <header>
-  <div class="header-row"><div class="brand"><h1>FinTick_</h1><span>ahead of the wire</span></div><div class="connection" role="status"><i class="pulse" id="pulse" aria-hidden="true"></i><span id="connection">CONNECTING</span></div></div>
-  <div class="pipeline-health" id="pipeline-health" aria-label="Pipeline accounting">Awaiting pipeline health…</div>
-  <div class="metrics" id="metrics" aria-label="Event status summary"></div>
+  <div class="topnav">
+    <div class="brand"><h1>FinTick_</h1><span>ahead of the wire</span></div>
+    <div class="metrics" id="metrics" role="group" aria-label="Filter events by validation status (select one or more)"></div>
+    <div class="header-right"><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch between light and dark theme">☾</button><div class="connection" role="status"><i class="pulse" id="pulse" aria-hidden="true"></i><span id="connection">CONNECTING</span></div></div>
+  </div>
+  <div class="strip">
+    <div class="pipeline-health" id="pipeline-health" aria-label="Pipeline accounting">Awaiting pipeline health…</div>
+    <div class="tape" aria-label="Latest event ticker"><div class="tape-track" id="tape"></div></div>
+  </div>
 </header>
-<section class="tape" aria-label="Latest event ticker"><div class="tape-track" id="tape"></div></section>
 <main>
   <div class="board-head"><div><h2>The Edge Board</h2><p>What the stream caught—and whether the news has caught up.</p></div><span class="updated" id="updated">Awaiting events…</span></div>
   <section class="feed" id="feed" aria-live="polite"><div class="empty">Loading the edge…</div></section>
@@ -148,17 +219,30 @@ footer{padding:20px;border-top:1px solid var(--line);color:var(--dim);text-align
 const $=id=>document.getElementById(id);
 function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node}
 function relativeTime(value){const time=Date.parse(value);if(!Number.isFinite(time))return'time unknown';const s=Math.max(0,Math.round((Date.now()-time)/1000));if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
-function safeStatus(value){return['breaking','confirmed','contradicted','developing'].includes(value)?value:'developing'}
-function badgeText(item){const n=Array.isArray(item.validations)?item.validations.length:0;switch(safeStatus(item.status)){case'breaking':return'BREAKING — no corroboration yet';case'confirmed':return'CONFIRMED — '+n+' source'+(n===1?'':'s');case'contradicted':return'CONTRADICTED';default:return'DEVELOPING'}}
+function safeStatus(value){return['breaking','confirmed','contradicted','developing','unconfirmed'].includes(value)?value:'developing'}
+function badgeText(item){const n=Array.isArray(item.validations)?item.validations.length:0;switch(safeStatus(item.status)){case'breaking':return'BREAKING — no corroboration yet';case'unconfirmed':return'UNCONFIRMED — wire still silent';case'confirmed':return'CONFIRMED — '+n+' source'+(n===1?'':'s');case'contradicted':return'CONTRADICTED';default:return'DEVELOPING'}}
 function lagText(seconds){if(!Number.isFinite(seconds))return'';const abs=Math.abs(seconds),value=abs<3600?Math.round(abs/60)+' min':(abs/3600).toFixed(1)+' hr';return seconds>=0?'news +'+value+' after the stream':'news '+value+' before the stream'}
-function renderPipeline(value){const p=value&&typeof value==='object'?value:{},node=$('pipeline-health'),backlog=Number(p.backlog)||0,errors=Number(p.terminal_errors)||0,accounted=Number(p.accounted)||0,posts=Number(p.posts)||0;node.replaceChildren();let state='CAUGHT UP',tone='good';if(errors>0){state='TERMINAL ERRORS';tone='bad'}else if(backlog>0){state='CATCHING UP';tone='warn'}const status=element('span',tone);status.append(element('b','',state));node.append(status);const coverage=element('span','');coverage.append(document.createTextNode('accounted '),element('b','',accounted+' / '+posts));node.append(coverage);const queue=element('span',backlog?'warn':'good');queue.append(document.createTextNode('backlog '),element('b','',String(backlog)));node.append(queue);if(backlog&&p.oldest_pending_at){const oldest=element('span','');oldest.append(document.createTextNode('oldest '),element('b','',relativeTime(p.oldest_pending_at)));node.append(oldest)}if(errors){const terminal=element('span','bad');terminal.append(document.createTextNode('errors '),element('b','',String(errors)));node.append(terminal)}$('connection').textContent=state;$('pulse').classList.toggle('catchup',backlog>0&&!errors);$('pulse').classList.toggle('error',errors>0)}
-function renderMetrics(items){const metrics=$('metrics');metrics.replaceChildren();for(const [status,label] of [['breaking','breaking now'],['confirmed','confirmed'],['developing','developing'],['contradicted','contradicted']]){const box=element('div','metric '+status);box.append(element('b','',String(items.filter(x=>x.status===status).length)),element('span','',label));metrics.append(box)}}
-function renderTape(items){const tape=$('tape');tape.replaceChildren();if(!items.length){tape.append(element('span','tick','No events yet'));return}function group(hidden){const node=element('div','tape-group');if(hidden)node.setAttribute('aria-hidden','true');for(const item of items.slice(0,24))node.append(element('span','tick '+safeStatus(item.status),String(item.headline||'')));return node}tape.append(group(false),group(true));tape.style.setProperty('--duration',Math.max(38,items.length*8)+'s')}
-function renderCard(item){const status=safeStatus(item.status),card=element('article','card '+status);const meta=element('div','card-meta');meta.append(element('span','badge',badgeText(item)));if(Number.isInteger(item.importance)){const rank=element('span','importance');rank.setAttribute('aria-label','Importance '+item.importance+' of 5');rank.append(document.createTextNode('◆'.repeat(item.importance)),element('i','', '◆'.repeat(5-item.importance)));meta.append(rank)}card.append(meta,element('h3','headline',String(item.headline||'Untitled event')));if(item.summary)card.append(element('p','summary',String(item.summary)));const origin=element('p','origin');origin.append(document.createTextNode('via the stream · seen '),element('strong','',String(item.stream_seen||0)+'×'),document.createTextNode(' · '+relativeTime(item.first_seen_at)));card.append(origin);
+function renderPipeline(value){const p=value&&typeof value==='object'?value:{},node=$('pipeline-health'),backlog=Number(p.backlog)||0,errors=Number(p.terminal_errors)||0,accounted=Number(p.accounted)||0,posts=Number(p.posts)||0;node.replaceChildren();let state='CAUGHT UP';if(errors>0){state='TERMINAL ERRORS'}else if(backlog>0){state='CATCHING UP'}const coverage=element('span','');coverage.append(document.createTextNode('accounted '),element('b','',accounted+' / '+posts));node.append(coverage);const queue=element('span',backlog?'warn':'good');queue.append(document.createTextNode('backlog '),element('b','',String(backlog)));node.append(queue);if(backlog&&p.oldest_pending_at){const oldest=element('span','');oldest.append(document.createTextNode('oldest '),element('b','',relativeTime(p.oldest_pending_at)));node.append(oldest)}if(errors){const terminal=element('span','bad');terminal.append(document.createTextNode('errors '),element('b','',String(errors)));node.append(terminal)}$('connection').textContent=state;$('pulse').classList.toggle('catchup',backlog>0&&!errors);$('pulse').classList.toggle('error',errors>0)}
+const FILTERS=[['all','all'],['breaking','breaking'],['unconfirmed','unconfirmed'],['developing','developing'],['confirmed','confirmed'],['contradicted','contradicted']];
+const activeFilters=new Set();
+function statusCount(items,status){return status==='all'?items.length:items.filter(x=>x.status===status).length}
+function renderMetrics(items){const metrics=$('metrics');metrics.replaceChildren();for(const [status,label] of FILTERS){const on=status==='all'?activeFilters.size===0:activeFilters.has(status),box=element('button','metric '+status+(on?' active':''));box.type='button';box.setAttribute('aria-pressed',String(on));box.append(element('span','',label),element('b','',String(statusCount(items,status))));box.addEventListener('click',()=>{if(status==='all')activeFilters.clear();else if(activeFilters.has(status))activeFilters.delete(status);else activeFilters.add(status);applyFilter()});metrics.append(box)}}
+function tick(item,hidden){const cls='tick '+safeStatus(item.status),text=String(item.headline||'');if(item.id===undefined||item.id===null)return element('span',cls,text);const link=element('a',cls,text);link.href='#evt-'+item.id;link.title='Jump to this event';if(hidden)link.tabIndex=-1;return link}
+function renderTape(items){const tape=$('tape');tape.replaceChildren();if(!items.length){tape.append(element('span','tick','No events yet'));return}function group(hidden){const node=element('div','tape-group');if(hidden)node.setAttribute('aria-hidden','true');for(const item of items.slice(0,24))node.append(tick(item,hidden));return node}tape.append(group(false),group(true));tape.style.setProperty('--duration',Math.max(38,items.length*8)+'s')}
+function renderCard(item){const status=safeStatus(item.status),card=element('article','card '+status);if(item.id!==undefined&&item.id!==null)card.id='evt-'+item.id;const meta=element('div','card-meta');meta.append(element('span','badge',badgeText(item)));if(Number.isInteger(item.importance)){const rank=element('span','importance');rank.setAttribute('aria-label','Importance '+item.importance+' of 5');rank.append(document.createTextNode('◆'.repeat(item.importance)),element('i','', '◆'.repeat(5-item.importance)));meta.append(rank)}card.append(meta,element('h3','headline',String(item.headline||'Untitled event')));if(item.summary)card.append(element('p','summary',String(item.summary)));const origin=element('p','origin');origin.append(document.createTextNode('via the stream · seen '),element('strong','',String(item.stream_seen||0)+'×'),document.createTextNode(' · '+relativeTime(item.first_seen_at)));card.append(origin);
 const facts=Array.isArray(item.facts)?item.facts:[];if(facts.length){const grid=element('div','facts');for(const fact of facts){if(!fact||fact.value===undefined)continue;const node=element('div','fact');node.append(element('b','',String(fact.value)+(fact.unit?' '+fact.unit:'')),element('span','',String(fact.label||'fact')));grid.append(node)}if(grid.childNodes.length)card.append(grid)}
 const instruments=Array.isArray(item.instruments)?item.instruments:[];if(instruments.length){const chips=element('div','chips');for(const instrument of instruments){const direction=['up','down','flat'].includes(instrument.direction)?instrument.direction:'flat';const marker=direction==='up'?'▲ ':direction==='down'?'▼ ':'— ';const chip=element('span','chip '+direction,marker+String(instrument.symbol||instrument.name||''));chip.title=String(instrument.name||instrument.symbol||'Instrument');chips.append(chip)}card.append(chips)}
 const links=Array.isArray(item.validations)?item.validations:[];if(links.length){const list=element('ul','sources');for(const story of links){if(!story||!story.url)continue;const li=element('li'),link=element('a','',String(story.title||story.url));link.href=String(story.url);link.target='_blank';link.rel='noopener noreferrer';li.append(link,document.createTextNode(' '),element('span','publisher','— '+String(story.publisher||'external news')));list.append(li)}if(list.childNodes.length)card.append(list)}const lag=lagText(item.lead_seconds);if(lag)card.append(element('p','lag',lag));return card}
-function render(data){const items=Array.isArray(data.items)?data.items:[],feed=$('feed');renderPipeline(data.pipeline);renderMetrics(items);renderTape(items);feed.replaceChildren();if(!items.length)feed.append(element('div','empty','No aggregated events yet. Ingest the stream, then run FinTick aggregate.'));else for(const item of items)feed.append(renderCard(item));const generated=new Date(data.generated_at);$('updated').textContent=Number.isNaN(generated.valueOf())?items.length+' events':items.length+' events · updated '+generated.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+let lastItems=[],lastGeneratedAt=null;
+function visibleItems(){return activeFilters.size===0?lastItems:lastItems.filter(x=>activeFilters.has(x.status))}
+function renderFeed(){const feed=$('feed'),items=visibleItems(),sel=[...activeFilters];feed.replaceChildren();if(!items.length)feed.append(element('div','empty',lastItems.length?('No '+(sel.length?sel.join(' / ')+' ':'')+'events to show.'):'No aggregated events yet. Ingest the stream, then run FinTick aggregate.'));else for(const item of items)feed.append(renderCard(item));const generated=new Date(lastGeneratedAt),total=lastItems.length,shown=items.length,count=sel.length===0?total+' events':shown+' of '+total+' · '+sel.join(' + '),stamp=Number.isNaN(generated.valueOf())?'':' · updated '+generated.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});$('updated').textContent=count+stamp}
+function applyFilter(){renderMetrics(lastItems);renderFeed()}
+function render(data){lastItems=Array.isArray(data.items)?data.items:[];lastGeneratedAt=data.generated_at;renderPipeline(data.pipeline);renderTape(lastItems);applyFilter()}
+function currentTheme(){const set=document.documentElement.dataset.theme;if(set==='light'||set==='dark')return set;return matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'}
+function syncThemeIcon(){$('theme-toggle').textContent=currentTheme()==='light'?'☀':'☾'}
+function toggleTheme(){const next=currentTheme()==='light'?'dark':'light';document.documentElement.dataset.theme=next;try{localStorage.setItem('fintick-theme',next)}catch(e){}syncThemeIcon()}
+$('theme-toggle').addEventListener('click',toggleTheme);syncThemeIcon();
+matchMedia('(prefers-color-scheme: light)').addEventListener('change',()=>{if(!document.documentElement.dataset.theme)syncThemeIcon()});
 let refreshInFlight=false;async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const response=await fetch('/api/feed',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);render(await response.json())}catch(error){$('connection').textContent='RECONNECTING';$('pulse').classList.add('error');if(!$('feed').querySelector('.card'))$('feed').replaceChildren(element('div','empty error-message','Event feed unavailable. FinTick will retry automatically.'))}finally{refreshInFlight=false}}
 refresh(); setInterval(refresh, 20000);
 </script>

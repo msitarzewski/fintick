@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fintick.aggregate import aggregate_once
@@ -43,6 +44,13 @@ class V2AcceptanceTests(unittest.TestCase):
             }]})
 
             aggregated = aggregate_once(database, call_model=lambda _: model_response)
+            # The fixture's post timestamps are historical; keep the event fresh so the
+            # board shows it breaking rather than aged into unconfirmed (see BREAKING_TTL).
+            with open_database(database) as connection:
+                connection.execute(
+                    "UPDATE events SET first_seen_at = ? WHERE status = 'breaking'",
+                    ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(),),
+                )
             validated = validate_pending(database, lookup=lambda _query, _limit: [], min_age=0)
             board = read_feed(database)
 
