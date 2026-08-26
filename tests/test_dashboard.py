@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 import tempfile
 import threading
 import unittest
@@ -11,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from fintick.dashboard import DASHBOARD_HTML, DashboardServer, read_feed
+from fintick.dashboard import BREAKING_TTL_SECONDS, DASHBOARD_HTML, DashboardServer, read_feed
 from fintick.ingest import ingest_fixture
 from fintick.service_handoff import snapshot_database
 from fintick.storage import (
@@ -50,8 +51,9 @@ class EventBoardFixture(unittest.TestCase):
                 },),
                 importance=4,
                 post_uris=uris,
-                first_seen_at="2026-08-24T15:00:11+00:00",
-                last_seen_at="2026-08-24T15:08:22+00:00",
+                # Fresh, so it is genuinely breaking (past the TTL it reads as unconfirmed).
+                first_seen_at=(datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+                last_seen_at=datetime.now(UTC).isoformat(),
             ))
 
 
@@ -130,6 +132,27 @@ class DashboardFeedTests(EventBoardFixture):
         )
         self.assertEqual(items[1]["validations"][0]["feed_type"], "rss")
         self.assertEqual(items[1]["lead_seconds"], 300)
+
+    def test_stale_breaking_event_reads_as_unconfirmed(self) -> None:
+        # A breaking event the wire never caught up on ages into 'unconfirmed'
+        # purely with time — no re-validation, no stored-status change.
+        stale_at = (
+            datetime.now(UTC) - timedelta(seconds=BREAKING_TTL_SECONDS + 120)
+        ).isoformat()
+        with open_database(self.database) as connection:
+            connection.execute(
+                "UPDATE events SET first_seen_at = ?, status = 'breaking' WHERE id = ?",
+                (stale_at, self.event_id),
+            )
+
+        event = read_feed(self.database)["items"][0]
+
+        self.assertEqual(event["status"], "unconfirmed")
+        with open_database(self.database) as connection:
+            stored = connection.execute(
+                "SELECT status FROM events WHERE id = ?", (self.event_id,)
+            ).fetchone()[0]
+        self.assertEqual(stored, "breaking")  # derived for display only
 
     def test_limit_validation_and_cap(self) -> None:
         with self.assertRaises(ValueError):

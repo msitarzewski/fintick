@@ -239,6 +239,55 @@ class ParseAggregationTests(unittest.TestCase):
                 self.assertEqual(parsed.events, ())
                 self.assertEqual(parsed.errored, 1)
 
+    def test_accepts_instrument_without_a_ticker_symbol(self) -> None:
+        # Indices, sovereign bonds, FX, and commodities have no ticker; the model
+        # identifies them by name + type and leaves symbol "" (or omits it). Both
+        # forms must parse — this is the exact class of event that was erroring out.
+        for symbol in ("", None):
+            with self.subTest(symbol=symbol):
+                instrument = {
+                    "name": "Brent crude",
+                    "type": "commodity",
+                    "direction": "down",
+                }
+                if symbol is not None:
+                    instrument["symbol"] = symbol
+                parsed = parse_aggregation(
+                    json.dumps({"events": [_event(
+                        canonical_headline="Brent crude falls below $88 per barrel",
+                        instruments=[instrument],
+                    )]}),
+                    allowed_uris=set(URIS),
+                    post_times={
+                        uri: f"2026-08-24T15:0{index}:00+00:00"
+                        for index, uri in enumerate(URIS)
+                    },
+                )
+                self.assertEqual(parsed.errored, 0)
+                self.assertEqual(len(parsed.events), 1)
+                self.assertEqual(parsed.events[0].instruments[0]["symbol"], "")
+                self.assertEqual(parsed.events[0].instruments[0]["name"], "Brent crude")
+
+    def test_untickered_event_keys_on_instrument_name_not_empty(self) -> None:
+        # Two distinct untickered events must not collide on an empty instrument key.
+        brent = parse_aggregation(
+            json.dumps({"events": [_event(
+                canonical_headline="Brent crude falls",
+                instruments=[{"name": "Brent crude", "type": "commodity", "direction": "down"}],
+            )]}),
+            allowed_uris=set(URIS),
+            post_times={uri: f"2026-08-24T15:0{i}:00+00:00" for i, uri in enumerate(URIS)},
+        )
+        yuan = parse_aggregation(
+            json.dumps({"events": [_event(
+                canonical_headline="PBOC sets yuan midpoint",
+                instruments=[{"name": "Chinese yuan", "type": "fx", "direction": "flat"}],
+            )]}),
+            allowed_uris=set(URIS),
+            post_times={uri: f"2026-08-24T15:0{i}:00+00:00" for i, uri in enumerate(URIS)},
+        )
+        self.assertNotEqual(brent.events[0].key, yuan.events[0].key)
+
 
 class AggregatePipelineTests(unittest.TestCase):
     def test_accounted_batch_persists_assignments_and_ignores_then_does_not_repeat(self) -> None:
