@@ -32,6 +32,10 @@ LLM_BASE_URL = os.environ.get("FINTICK_LLM_BASE_URL", "http://localhost:11434/v1
 LLM_API_KEY = os.environ.get("FINTICK_LLM_API_KEY", "ollama")
 LLM_MODEL = os.environ.get("FINTICK_LLM_MODEL", "qwen3.8:27b")
 DEFAULT_MODEL = LLM_MODEL  # backward-compat alias
+# Reasoning models (GPT-5.x) spend this budget on hidden reasoning BEFORE emitting output, so it
+# must leave room for both. 4096 gets fully consumed by reasoning on hard batches -> empty content;
+# 16384 leaves ample headroom (observed ~5-7k total). Tunable per-model via the env var.
+LLM_MAX_TOKENS = int(os.environ.get("FINTICK_LLM_MAX_TOKENS", "16384"))
 WINDOW = timedelta(hours=6)
 MAX_POSTS = 200
 DEFAULT_BATCH = 50
@@ -416,8 +420,8 @@ def call_inference(
         "model": model,
         "stream": False,
         # GPT-5.x requires max_completion_tokens (not max_tokens) and rejects any non-default
-        # temperature; response_format json_object constrains output regardless.
-        "max_completion_tokens": 4096,
+        # temperature; it also spends this budget on hidden reasoning first, so keep headroom.
+        "max_completion_tokens": LLM_MAX_TOKENS,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
