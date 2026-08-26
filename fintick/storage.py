@@ -442,6 +442,16 @@ V2_SCHEMA = (
     """,
     "CREATE INDEX IF NOT EXISTS post_aggregation_decisions_state_idx "
     "ON post_aggregation_decisions(state, updated_at)",
+    """
+    CREATE TABLE IF NOT EXISTS inference_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        model TEXT NOT NULL,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS inference_usage_at_idx ON inference_usage(at)",
 )
 
 
@@ -805,6 +815,57 @@ def load_pipeline_health(connection: sqlite3.Connection) -> dict[str, Any]:
         "latest_decision_at": latest_decision,
         "decisions": counts,
     }
+
+
+def record_inference_usage(
+    connection: sqlite3.Connection,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    """Append one inference call's token usage for later cost accounting."""
+    connection.execute(
+        "INSERT INTO inference_usage (at, model, prompt_tokens, completion_tokens) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            datetime.now(UTC).isoformat(),
+            str(model or "unknown"),
+            int(prompt_tokens or 0),
+            int(completion_tokens or 0),
+        ),
+    )
+
+
+# Rolling windows for the operator cost tracker (label -> lookback).
+INFERENCE_COST_WINDOWS = {
+    "hour": timedelta(hours=1),
+    "day": timedelta(days=1),
+    "week": timedelta(weeks=1),
+    "month": timedelta(days=30),
+}
+
+
+def load_inference_usage(connection: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    """Sum token usage per model over each rolling window (pricing applied upstream)."""
+    now = datetime.now(UTC)
+    windows: dict[str, list[dict[str, Any]]] = {}
+    for label, delta in INFERENCE_COST_WINDOWS.items():
+        cutoff = (now - delta).isoformat()
+        rows = connection.execute(
+            "SELECT model, COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
+            "COUNT(*) FROM inference_usage WHERE at >= ? GROUP BY model",
+            (cutoff,),
+        ).fetchall()
+        windows[label] = [
+            {
+                "model": row[0],
+                "prompt_tokens": int(row[1]),
+                "completion_tokens": int(row[2]),
+                "calls": int(row[3]),
+            }
+            for row in rows
+        ]
+    return windows
 
 
 def load_events(

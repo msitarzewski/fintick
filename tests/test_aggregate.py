@@ -82,6 +82,60 @@ class InferenceCallTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             call_inference("[]")
 
+    @mock.patch("fintick.aggregate.urllib.request.urlopen")
+    def test_usage_sink_receives_token_counts(self, urlopen: mock.Mock) -> None:
+        urlopen.return_value = BytesIO(json.dumps({
+            "choices": [{"message": {"content": "{\"events\":[]}"}}],
+            "usage": {"prompt_tokens": 1735, "completion_tokens": 3497},
+        }).encode())
+        captured: list[dict[str, object]] = []
+        call_inference("[]", model="gpt-5.6-luna", usage_sink=captured.append)
+        self.assertEqual(captured, [
+            {"model": "gpt-5.6-luna", "prompt_tokens": 1735, "completion_tokens": 3497},
+        ])
+
+    @mock.patch("fintick.aggregate.urllib.request.urlopen")
+    def test_usage_recorded_even_when_content_is_empty(self, urlopen: mock.Mock) -> None:
+        # Empty output still burned tokens — the cost must be captured before raising.
+        urlopen.return_value = BytesIO(json.dumps({
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"prompt_tokens": 1700, "completion_tokens": 16384},
+        }).encode())
+        captured: list[dict[str, object]] = []
+        with self.assertRaises(RuntimeError):
+            call_inference("[]", model="gpt-5.6-luna", usage_sink=captured.append)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["completion_tokens"], 16384)
+
+
+class InferenceCostTests(unittest.TestCase):
+    def test_prices_cloud_model_and_frees_local(self) -> None:
+        from fintick.aggregate import inference_cost_usd
+        self.assertAlmostEqual(
+            inference_cost_usd("gpt-5.6-luna", 1_000_000, 1_000_000), 0.20 + 1.20
+        )
+        self.assertEqual(inference_cost_usd("qwen3.8:27b", 5000, 4000), 0.0)
+        self.assertEqual(inference_cost_usd(None, 5000, 4000), 0.0)
+
+    def test_usage_windows_sum_per_model(self) -> None:
+        import tempfile
+        from fintick.storage import (
+            open_database, record_inference_usage, load_inference_usage,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.db"
+            with open_database(db) as connection:
+                record_inference_usage(connection, "gpt-5.6-luna", 1735, 3497)
+                record_inference_usage(connection, "gpt-5.6-luna", 1700, 5000)
+            with open_database(db) as connection:
+                windows = load_inference_usage(connection)
+            self.assertEqual(set(windows), {"hour", "day", "week", "month"})
+            hour = windows["hour"]
+            self.assertEqual(len(hour), 1)
+            self.assertEqual(hour[0]["calls"], 2)
+            self.assertEqual(hour[0]["prompt_tokens"], 3435)
+            self.assertEqual(hour[0]["completion_tokens"], 8497)
+
 
 class AccountedAggregationTests(unittest.TestCase):
     def test_short_ids_map_to_uris_and_every_post_gets_a_decision(self) -> None:
