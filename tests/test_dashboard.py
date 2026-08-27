@@ -264,14 +264,20 @@ class DiscoverabilityTests(ServedBoardFixture):
         graph = json.loads(block)["@graph"]
         self.assertEqual({node["@type"] for node in graph}, {"WebSite", "WebApplication"})
 
-    def test_robots_points_at_sitemap_and_shields_api_and_ops(self) -> None:
+    def test_robots_points_at_sitemap_and_disallows_the_api(self) -> None:
         status, headers, body = self._get("/robots.txt")
         text = body.decode()
         self.assertEqual(status, 200)
         self.assertTrue(headers["Content-Type"].startswith("text/plain"))
         self.assertIn("Disallow: /api/", text)
-        self.assertIn("Disallow: /*?ops", text)
         self.assertIn("Sitemap: https://fintick.fyi/sitemap.xml", text)
+
+    def test_public_documents_never_name_the_operator_view(self) -> None:
+        # robots.txt and llms.txt are fetched by scanners. Naming the operator view in
+        # either advertises it; a Disallow line is a signpost, not a shield.
+        for path in ("/robots.txt", "/llms.txt", "/sitemap.xml"):
+            _, _, body = self._get(path)
+            self.assertNotIn("ops", body.decode().lower(), f"{path} names the operator view")
 
     def test_sitemap_is_well_formed_xml(self) -> None:
         import xml.etree.ElementTree as ET
