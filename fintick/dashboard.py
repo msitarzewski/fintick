@@ -21,6 +21,14 @@ from fintick.storage import (
     open_database,
 )
 
+ASSET_DIR = Path(__file__).resolve().parent / "assets"
+ASSET_ROUTES = {
+    "/og.png": ("og.png", "image/png"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/favicon.ico": ("favicon.svg", "image/svg+xml"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+}
+
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 250
 # 'unconfirmed' sinks to the bottom: it is breaking that the wire never caught up on.
@@ -138,13 +146,111 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
     }
 
 
+SITE_ORIGIN = os.environ.get("FINTICK_SITE_ORIGIN", "https://fintick.fyi").rstrip("/")
+
+# Crawlable: the board itself. Not crawlable: the JSON API (no prose to index) and the
+# ?ops operator view, which is the same page plus telemetry and would read as duplicate
+# content. The canonical link handles ?ops for engines that ignore the query rule.
+ROBOTS_TXT = """User-agent: *
+Allow: /$
+Disallow: /api/
+Disallow: /*?ops
+
+Sitemap: {origin}/sitemap.xml
+"""
+
+SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>{origin}/</loc>
+    <changefreq>hourly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
+"""
+
+# AEO: a plain-language brief for answer engines and browsing agents, which reward a
+# stated method and explicit limits over marketing copy.
+LLMS_TXT = """# FinTick
+
+> A live tape of financial events, scored by whether independent news has caught up yet.
+
+FinTick ingests one public financial stream, aggregates its posts into distinct events
+using a language model, extracts structured facts from each, then searches independent
+news sources to corroborate them.
+
+## How an event is classified
+
+- **breaking** — no independent source has reported it yet. The stream is ahead of the wire.
+- **unconfirmed** — was breaking, and the wire still had not corroborated it after the
+  configured window elapsed.
+- **developing** — partially corroborated.
+- **confirmed** — independently reported by one or more outlets.
+- **contradicted** — an independent source disputes it.
+
+## Method and limits
+
+- Aggregation performs the deduplication: repeated posts about one event merge into that
+  event and are retained as `seen N times` evidence rather than discarded.
+- Every ingested post is preserved by immutable URI and receives exactly one durable
+  outcome. A post belongs to at most one event.
+- Social posts are treated as stream signal, never as independent corroboration.
+- FinTick reports whether an event has been corroborated. It does not assert that an
+  event is true, and it is not investment advice.
+
+## Endpoints
+
+- `/` — the board.
+- `/api/feed` — the same events as JSON.
+
+## Source
+
+- https://github.com/msitarzewski/fintick
+"""
+
 DASHBOARD_HTML = r'''<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0b0d0c" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f3f1ea" media="(prefers-color-scheme: light)">
 <title>FinTick — The Edge Board</title>
+<meta name="description" content="A live tape of financial events. FinTick aggregates a public stream into distinct events, extracts the facts, then hunts independent news to corroborate them — an event no outlet has confirmed yet is flagged breaking.">
+<link rel="canonical" href="https://fintick.fyi/">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="FinTick">
+<meta property="og:title" content="FinTick — ahead of the wire">
+<meta property="og:description" content="A live tape of financial events, scored by whether independent news has caught up yet.">
+<meta property="og:url" content="https://fintick.fyi/">
+<meta property="og:image" content="https://fintick.fyi/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="FinTick — a breaking financial event with zero external sources, ahead of the wire.">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="FinTick — ahead of the wire">
+<meta name="twitter:description" content="A live tape of financial events, scored by whether independent news has caught up yet.">
+<meta name="twitter:image" content="https://fintick.fyi/og.png">
+<meta name="twitter:image:alt" content="FinTick — a breaking financial event with zero external sources, ahead of the wire.">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[
+{"@type":"WebSite","@id":"https://fintick.fyi/#website","url":"https://fintick.fyi/","name":"FinTick",
+ "description":"A live tape of financial events, scored by whether independent news has caught up yet.",
+ "inLanguage":"en"},
+{"@type":"WebApplication","@id":"https://fintick.fyi/#app","url":"https://fintick.fyi/","name":"FinTick",
+ "applicationCategory":"FinanceApplication","browserRequirements":"Requires JavaScript.",
+ "operatingSystem":"Any","isAccessibleForFree":true,
+ "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
+ "description":"FinTick ingests a public financial stream, aggregates posts into distinct events, extracts structured facts, and searches independent news to corroborate each one. An event with no external sources is flagged breaking.",
+ "featureList":["Event aggregation from a public stream","Structured fact extraction","Independent news corroboration","Breaking detection when no outlet has reported an event yet"]}
+]}
+</script>
 <script>try{var t=localStorage.getItem('fintick-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}
 /* Operator telemetry (pipeline health + status pill) is hidden for public visitors.
    Reveal it with ?ops (or ?ops=1) — it persists per-browser; ?ops=0 clears it. */
@@ -307,11 +413,29 @@ class DashboardServer(ThreadingHTTPServer):
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
+    # Social scrapers and link validators HEAD an og:image before fetching it, and the
+    # base handler answers 501 for any verb it has no do_* for — which reads as a broken
+    # image. HEAD routes through do_GET and drops the body.
+    _head_only = False
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._head_only = True
+        try:
+            self.do_GET()
+        finally:
+            self._head_only = False
+
+    def _send(
+        self,
+        status: HTTPStatus,
+        body: bytes,
+        content_type: str,
+        cache_control: str = "no-store",
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header(
             "Content-Security-Policy",
@@ -319,10 +443,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
         )
         self.end_headers()
-        self.wfile.write(body)
+        # HEAD keeps every header, including Content-Length, but sends no body.
+        if not self._head_only:
+            self.wfile.write(body)
+
+    def _send_asset(self, name: str, content_type: str) -> None:
+        try:
+            body = (ASSET_DIR / name).read_bytes()
+        except OSError as error:
+            self.log_error("asset %s unavailable: %s", name, error)
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
+            return
+        self._send(HTTPStatus.OK, body, content_type, cache_control="public, max-age=86400")
 
     def do_GET(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
+        if parts.path == "/robots.txt":
+            body = ROBOTS_TXT.format(origin=SITE_ORIGIN).encode()
+            self._send(HTTPStatus.OK, body, "text/plain; charset=utf-8",
+                       cache_control="public, max-age=3600")
+            return
+        if parts.path == "/sitemap.xml":
+            body = SITEMAP_XML.format(origin=SITE_ORIGIN).encode()
+            self._send(HTTPStatus.OK, body, "application/xml; charset=utf-8",
+                       cache_control="public, max-age=3600")
+            return
+        if parts.path == "/llms.txt":
+            self._send(HTTPStatus.OK, LLMS_TXT.encode(), "text/plain; charset=utf-8",
+                       cache_control="public, max-age=3600")
+            return
+        asset = ASSET_ROUTES.get(parts.path)
+        if asset is not None:
+            self._send_asset(*asset)
+            return
         if parts.path in {"/", "/index.html"}:
             self._send(HTTPStatus.OK, DASHBOARD_HTML.encode(), "text/html; charset=utf-8")
             return
