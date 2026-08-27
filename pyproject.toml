@@ -17,3 +17,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["fintick*"]
+
+# Share-card image and icons are served from disk at runtime; without this they are
+# dropped from a built distribution and /og.png 404s.
+[tool.setuptools.package-data]
+fintick = ["assets/*"]

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="FinTick">
+  <rect width="64" height="64" rx="12" fill="#0b0d0c"/>
+  <!-- F: stem ends at y=46 so the caret below is clearly detached, not a third arm -->
+  <path d="M16 12h33v9H25v8h19v9H25v8h-9z" fill="#e0a765"/>
+  <rect x="16" y="52" width="33" height="6" fill="#ff6b61"/>
+</svg>

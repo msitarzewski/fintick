@@ -160,7 +160,9 @@ class DashboardFeedTests(EventBoardFixture):
         self.assertEqual(read_feed(self.database, limit=10_000)["count"], 1)
 
 
-class DashboardHttpTests(EventBoardFixture):
+class ServedBoardFixture(EventBoardFixture):
+    """A running board. Carries no tests, so subclasses do not re-run each other's."""
+
     def setUp(self) -> None:
         super().setUp()
         self.server = DashboardServer(("127.0.0.1", 0), self.database)
@@ -174,6 +176,8 @@ class DashboardHttpTests(EventBoardFixture):
         self.server.server_close()
         self.thread.join(timeout=2)
 
+
+class DashboardHttpTests(ServedBoardFixture):
     def test_dashboard_is_v2_event_board_and_auto_refreshing(self) -> None:
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode()
@@ -224,6 +228,92 @@ class DashboardHttpTests(EventBoardFixture):
         self.assertIn("CATCHING UP", DASHBOARD_HTML)
         self.assertIn("TERMINAL ERRORS", DASHBOARD_HTML)
         self.assertIn('href="#feed"', DASHBOARD_HTML)
+
+
+class DiscoverabilityTests(ServedBoardFixture):
+    """Metadata and crawler routes: a broken one fails silently in production."""
+
+    def _get(self, path: str) -> tuple[int, dict[str, str], bytes]:
+        with urllib.request.urlopen(self.base_url + path, timeout=2) as response:
+            return response.status, dict(response.headers), response.read()
+
+    def test_share_metadata_is_complete_and_absolute(self) -> None:
+        head = DASHBOARD_HTML.split("</head>")[0]
+        for tag in (
+            '<meta name="description"',
+            '<link rel="canonical" href="https://fintick.fyi/">',
+            '<meta property="og:title"',
+            '<meta property="og:description"',
+            '<meta property="og:image" content="https://fintick.fyi/og.png">',
+            '<meta property="og:image:width" content="1200">',
+            '<meta property="og:image:height" content="630">',
+            '<meta property="og:image:alt"',
+            '<meta name="twitter:card" content="summary_large_image">',
+            '<meta name="twitter:image" content="https://fintick.fyi/og.png">',
+            '<link rel="icon" href="/favicon.svg"',
+        ):
+            self.assertIn(tag, head, f"missing share metadata: {tag}")
+        # Relative og:image is the classic silent break — scrapers do not resolve it.
+        for prop in ("og:image", "twitter:image", "og:url"):
+            value = head.split(f'"{prop}" content="')[1].split('"')[0]
+            self.assertTrue(value.startswith("https://"), f"{prop} must be absolute")
+
+    def test_structured_data_parses(self) -> None:
+        head = DASHBOARD_HTML.split("</head>")[0]
+        block = head.split('<script type="application/ld+json">')[1].split("</script>")[0]
+        graph = json.loads(block)["@graph"]
+        self.assertEqual({node["@type"] for node in graph}, {"WebSite", "WebApplication"})
+
+    def test_robots_points_at_sitemap_and_shields_api_and_ops(self) -> None:
+        status, headers, body = self._get("/robots.txt")
+        text = body.decode()
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/plain"))
+        self.assertIn("Disallow: /api/", text)
+        self.assertIn("Disallow: /*?ops", text)
+        self.assertIn("Sitemap: https://fintick.fyi/sitemap.xml", text)
+
+    def test_sitemap_is_well_formed_xml(self) -> None:
+        import xml.etree.ElementTree as ET
+
+        status, _, body = self._get("/sitemap.xml")
+        self.assertEqual(status, 200)
+        root = ET.fromstring(body.decode())
+        namespace = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+        self.assertEqual(root.tag, f"{namespace}urlset")
+        locations = [url.findtext(f"{namespace}loc") for url in root]
+        self.assertEqual(locations, ["https://fintick.fyi/"])
+
+    def test_llms_txt_states_the_method_and_its_limits(self) -> None:
+        status, _, body = self._get("/llms.txt")
+        text = body.decode()
+        self.assertEqual(status, 200)
+        self.assertIn("# FinTick", text)
+        for status_name in ("breaking", "unconfirmed", "confirmed", "contradicted"):
+            self.assertIn(status_name, text)
+        self.assertIn("not investment advice", text)
+
+    def test_assets_are_served_with_types_and_cached(self) -> None:
+        for path, content_type in (
+            ("/og.png", "image/png"),
+            ("/favicon.svg", "image/svg+xml"),
+            ("/apple-touch-icon.png", "image/png"),
+        ):
+            status, headers, body = self._get(path)
+            self.assertEqual(status, 200, path)
+            self.assertEqual(headers["Content-Type"], content_type, path)
+            self.assertIn("max-age", headers["Cache-Control"], path)
+            self.assertTrue(body, f"{path} served empty")
+
+    def test_head_is_answered_for_scrapers(self) -> None:
+        # Social scrapers HEAD an og:image first; the base handler 501s without do_HEAD,
+        # which reads to them as a broken image.
+        for path in ("/", "/og.png"):
+            request = urllib.request.Request(self.base_url + path, method="HEAD")
+            with urllib.request.urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 200, path)
+                self.assertEqual(response.read(), b"", f"{path} HEAD returned a body")
+                self.assertTrue(response.headers["Content-Length"], path)
 
 
 if __name__ == "__main__":
