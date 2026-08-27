@@ -148,13 +148,16 @@ def read_feed(database: str | Path, *, limit: int = DEFAULT_LIMIT) -> dict[str, 
 
 SITE_ORIGIN = os.environ.get("FINTICK_SITE_ORIGIN", "https://fintick.fyi").rstrip("/")
 
-# Crawlable: the board itself. Not crawlable: the JSON API (no prose to index) and the
-# ?ops operator view, which is the same page plus telemetry and would read as duplicate
-# content. The canonical link handles ?ops for engines that ignore the query rule.
+# Crawlable: the board itself. Not crawlable: the JSON API, which carries no prose to
+# index.
+#
+# The operator view is deliberately NOT named here. robots.txt is a public file that
+# scanners fetch first, so a Disallow line advertises a path rather than protecting it.
+# Consolidating the operator view onto the board is the canonical link's job, and it
+# does that without publishing anything.
 ROBOTS_TXT = """User-agent: *
 Allow: /$
 Disallow: /api/
-Disallow: /*?ops
 
 Sitemap: {origin}/sitemap.xml
 """
