@@ -264,14 +264,38 @@ def _bootstrap_post_aggregation_decisions(connection: sqlite3.Connection) -> Non
     )
 
 
+# How long a connection waits for a lock before raising. Python's sqlite3 default is 5s,
+# which is not enough when several workers open the database at the same instant and each
+# runs the migration block in a write transaction. WAL lets readers and one writer coexist;
+# this covers the writer-vs-writer moment at startup.
+BUSY_TIMEOUT_SECONDS = 30.0
+
+
 @contextmanager
 def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
     """Open and initialize a FinTick database, committing on success."""
     database = Path(path)
     database.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database)
+    connection = sqlite3.connect(database, timeout=BUSY_TIMEOUT_SECONDS)
     try:
-        connection.execute("PRAGMA journal_mode=WAL")
+        # The timeout on connect() above is what actually makes a blocked open wait; the
+        # PRAGMA restates it for any connection opened elsewhere and makes the value visible
+        # to `PRAGMA busy_timeout`. Set it before the WAL switch, which can itself need a lock.
+        #
+        # Why this is needed: every open runs the schema/migration block inside a write
+        # transaction, so four workers starting in the same second all contend for one write
+        # lock before doing any real work. That surfaced as "OperationalError: database is
+        # locked" one second after every boot and deploy, costing a full 900s cycle. The
+        # contention lasts milliseconds — waiting it out is the correct response.
+        connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_SECONDS * 1000:.0f}")
+        # journal_mode is a PERSISTENT property of the database file, so re-setting it on
+        # every open is pointless — and not free. Switching journal mode needs an exclusive
+        # lock, and SQLite answers SQLITE_BUSY for it IMMEDIATELY rather than honouring the
+        # busy handler, so no timeout can save it. Four workers opening in the same second
+        # therefore raced on a switch that was already a no-op. Read first, write only if
+        # it actually needs changing.
+        if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN")
         # Legacy databases need columns before indexes can refer to them.
